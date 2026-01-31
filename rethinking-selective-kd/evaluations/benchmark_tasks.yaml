@@ -1,0 +1,47 @@
+manual_tasks:
+  - task: svamp
+    dataset_path: ChilleD/SVAMP
+    test_split: test
+    output_type: generate_until
+    generation_kwargs:
+      max_new_tokens: 256
+      do_sample: false
+      temperature: 0.0
+    process_docs: !function sampledkd.evaluations.utils.process_docs_svamp
+    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    num_fewshot: 0
+
+  - task: aime25
+    dataset_path: AI-MO/aimo-validation-aime
+    test_split: train
+    output_type: generate_until
+    generation_kwargs:
+      max_new_tokens: 256
+      do_sample: false
+      temperature: 0.0
+    process_docs: !function sampledkd.evaluations.utils.process_docs_aimo
+    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    num_fewshot: 0
+
+  - task: aime24
+    dataset_path: AI-MO/aimo-test-aime-2024
+    test_split: test
+    output_type: generate_until
+    generation_kwargs:
+      max_new_tokens: 256
+      do_sample: false
+      temperature: 0.0
+    process_docs: !function sampledkd.evaluations.utils.process_docs_aimo
+    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    num_fewshot: 0
+
+  - task: ifeval
+    dataset_path: google/IFEval
+    test_split: train
+    output_type: generate_until
+    generation_kwargs:
+      max_new_tokens: 256
+      do_sample: false
+      temperature: 0.0
+    process_docs: !function sampledkd.evaluations.utils.process_docs_ifeval
+    num_fewshot: 0
