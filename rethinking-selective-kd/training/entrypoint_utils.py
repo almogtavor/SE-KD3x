@@ -161,7 +161,7 @@ def load_fineweb_subset(
 
     Returns a list of {prompt, answer} examples.
     """
-    from sampledkd.data.cache import load_or_create_fineweb_cache
+    from sekd.data.cache import load_or_create_fineweb_cache
 
     return load_or_create_fineweb_cache(
         tokenizer=tokenizer,

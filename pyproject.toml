@@ -1,0 +1,117 @@
+[project]
+name = "sekd"
+version = "0.1.0"
+description = "SE-KD3X: Rethinking Selective Knowledge Distillation for LLMs"
+readme = "README.md"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Almog Tavor", email = "almogt@mail.tau.ac.il"},
+    {name = "Neil Cnaan", email = "neilcnaan@mail.tau.ac.il"},
+    {name = "Itay Ebenspanger", email = "ebenspanger@mail.tau.ac.il"},
+    {name = "Mor Geva", email = "morgeva@tauex.tau.ac.il"},
+]
+keywords = [
+    "knowledge-distillation",
+    "llm",
+    "machine-learning",
+    "deep-learning",
+    "transformers",
+    "pytorch",
+    "nlp",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2.0",
+    "transformers>=4.45.0",
+    "datasets>=2.14.0",
+    "accelerate>=0.25.0",
+    "bitsandbytes>=0.41.0",
+    "sentencepiece>=0.1.99",
+    "pydantic>=2.0.0",
+    "numpy<2",
+    "tqdm>=4.65.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+eval = [
+    "lm-eval>=0.4.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "scikit-learn>=1.3.0",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+logging = [
+    "wandb>=0.15.0",
+    "tensorboard>=2.14.0",
+]
+all = [
+    "sekd[eval,dev,logging]",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/SE-KD3X"
+Documentation = "https://github.com/yourusername/SE-KD3X#readme"
+Repository = "https://github.com/yourusername/SE-KD3X.git"
+Issues = "https://github.com/yourusername/SE-KD3X/issues"
+
+[project.scripts]
+sekd-train = "sekd.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["sekd"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/sekd",
+    "/tests",
+    "/examples",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.isort]
+known-first-party = ["sekd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --tb=short"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

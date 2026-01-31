@@ -39,7 +39,7 @@ from .kd_temperature_schedule import KDTemperatureSchedule
 from .losses.udkd import UDKDLoss
 from .oom_setup_helper import OOMSetupHelper
 from .forward_batch_runner import ForwardBatchRunner, SkipBatch
-from sampledkd.distill.sample_skipper import FrozenStudentSampleSkipper
+from sekd.distill.sample_skipper import FrozenStudentSampleSkipper
 
 
 class TrainingTimeLimitReached(RuntimeError):
@@ -57,6 +57,7 @@ class TrainingTimeLimitReached(RuntimeError):
         self.checkpoint_path = checkpoint_path
         self.elapsed_s = elapsed_s
         self.limit_s = limit_s
+
 
 class Distiller(
     AmpOomMixin,
@@ -88,19 +89,21 @@ class Distiller(
         self.ddp_rank = int(getattr(self.config, "ddp_rank", 0))
         self.ddp_local_rank = int(getattr(self.config, "ddp_local_rank", 0))
         self.ddp_enabled = bool(
-            self.ddp_world_size > 1
-            and dist.is_available()
-            and dist.is_initialized()
+            self.ddp_world_size > 1 and dist.is_available() and dist.is_initialized()
         )
 
         self.teacher_rank0_only = bool(getattr(config, "_teacher_rank0_owner", False))
-        self.teacher_required = bool(getattr(config, "_teacher_required", teacher_model is not None))
+        self.teacher_required = bool(
+            getattr(config, "_teacher_required", teacher_model is not None)
+        )
         if teacher_model is not None:
             self.teacher = teacher_model.eval()
         else:
             self.teacher = None
             if self.teacher_required and not self.teacher_rank0_only:
-                raise ValueError("Teacher model is required but unavailable for this rank.")
+                raise ValueError(
+                    "Teacher model is required but unavailable for this rank."
+                )
         self.student = student_model.to(student_device).train()
         teacher_device_str = getattr(config, "_teacher_device_str", None)
         if teacher_device_str is not None:
@@ -137,14 +140,16 @@ class Distiller(
         self._total_train_tokens = 0
         self._cache_build_on_miss_done = False
         self._total_train_iterations = 0
-        self._peak_memory_samples: List[float] = []  # per-step peak memory (GB) when log_peak_memory is enabled
+        self._peak_memory_samples: List[
+            float
+        ] = []  # per-step peak memory (GB) when log_peak_memory is enabled
 
         # GLS ring buffer state (inactive unless enabled)
         self._gls_buf: Optional[torch.Tensor] = None
         self._gls_cap: int = int(getattr(self.config, "gls_queue_size", 30000))
         self._gls_count: int = 0
         self._gls_head: int = 0
-        
+
         # Checkpointing
         self.output_dir = Path(config.output_dir)
         self.checkpoint_dir = self.output_dir / "checkpoints"
@@ -172,7 +177,9 @@ class Distiller(
         dump_path: Optional[Path]
         if dump_path_cfg is not None:
             tmp_path = Path(dump_path_cfg)
-            dump_path = tmp_path if tmp_path.is_absolute() else self.output_dir / tmp_path
+            dump_path = (
+                tmp_path if tmp_path.is_absolute() else self.output_dir / tmp_path
+            )
         else:
             # Name file after distill type for clarity
             safe_name = distill_type.replace("-", "_")
@@ -197,7 +204,9 @@ class Distiller(
             cfg_path = getattr(self.config, "topk_debug_dump_path", None)
             if cfg_path:
                 tmp_path = Path(cfg_path)
-                debug_path = tmp_path if tmp_path.is_absolute() else self.output_dir / tmp_path
+                debug_path = (
+                    tmp_path if tmp_path.is_absolute() else self.output_dir / tmp_path
+                )
             else:
                 debug_path = self.output_dir / "topk_selection_debug.jsonl"
             debug_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +222,9 @@ class Distiller(
         self._last_ce_selection_mask: Optional[torch.Tensor] = None
 
         # Entropy curriculum settings (optional)
-        self._selection_curriculum_active = bool(getattr(self.config, "selection_curriculum", False))
+        self._selection_curriculum_active = bool(
+            getattr(self.config, "selection_curriculum", False)
+        )
         steps = int(getattr(self.config, "selection_curriculum_steps", 2000))
         self._selection_curriculum_steps = max(1, steps)
         start_frac = float(getattr(self.config, "selection_curriculum_start", 0.0))
@@ -222,7 +233,9 @@ class Distiller(
         end_frac = min(max(end_frac, 0.0), 1.0)
         self._selection_curriculum_start = start_frac
         self._selection_curriculum_end = end_frac
-        self._selection_curriculum_power = max(0.0, float(getattr(self.config, "selection_curriculum_power", 1.0)))
+        self._selection_curriculum_power = max(
+            0.0, float(getattr(self.config, "selection_curriculum_power", 1.0))
+        )
 
         # LinUCB contextual bandit setup
         self._init_bandit_manager()
@@ -236,7 +249,9 @@ class Distiller(
                 student_device=torch.device(self.student_device),
                 dataloader=self.dataloader,
                 teacher=self.teacher,
-                teacher_device=torch.device(self.teacher_device) if self.teacher_device is not None else None,
+                teacher_device=torch.device(self.teacher_device)
+                if self.teacher_device is not None
+                else None,
             )
 
     def _wrap_student_for_ddp(self) -> None:
@@ -290,7 +305,9 @@ class Distiller(
                 h.update(str(sid).encode("utf-8"))
         return h.hexdigest()
 
-    def _kl_directional(self, log_p_teacher: torch.Tensor, log_q_student: torch.Tensor) -> torch.Tensor:
+    def _kl_directional(
+        self, log_p_teacher: torch.Tensor, log_q_student: torch.Tensor
+    ) -> torch.Tensor:
         objective = getattr(self.config, "kd_objective", "forward")
         if objective == "reverse":
             kl = self._kl_loss(log_q_student, log_p_teacher)
@@ -397,7 +414,7 @@ class Distiller(
         if not mask.any():
             return vec, idx, False
         return vec[mask], idx[mask], True
-    
+
     def _detect_student_dtype(self) -> torch.dtype:
         """Infer the student's numeric precision so downstream casts stay consistent."""
         base = self._student_base
@@ -422,7 +439,7 @@ class Distiller(
             progress = min(1.0, max(0.0, self.global_step / float(steps)))
         power = self._selection_curriculum_power
         if power > 0.0:
-            progress = progress ** power
+            progress = progress**power
         start = self._selection_curriculum_start
         end = self._selection_curriculum_end
         if end < start:
@@ -461,7 +478,9 @@ class Distiller(
         mask_out[valid_indices[chosen_rel]] = True
         return mask_out
 
-    def _selection_curriculum_sampling_weights(self, ent_values: torch.Tensor) -> torch.Tensor:
+    def _selection_curriculum_sampling_weights(
+        self, ent_values: torch.Tensor
+    ) -> torch.Tensor:
         """Return sampling weights that interpolate from low-entropy preference to high-entropy preference."""
         if ent_values.numel() == 0:
             return torch.ones_like(ent_values, dtype=torch.float32)
@@ -491,7 +510,9 @@ class Distiller(
         amp_dtype: torch.dtype,
     ) -> torch.Tensor:
         if not self.teacher_available:
-            raise RuntimeError("Teacher logits requested but no teacher is available on this rank.")
+            raise RuntimeError(
+                "Teacher logits requested but no teacher is available on this rank."
+            )
         if self.teacher is not None and not self.teacher_rank0_only:
             from torch.cuda.amp import autocast
 
@@ -505,7 +526,9 @@ class Distiller(
                         output_hidden_states=False,
                     ).logits
             return self._sanitize_logits(logits, "teacher")
-        return self._teacher_forward_distributed(input_ids, attn_mask, amp_enabled, amp_dtype)
+        return self._teacher_forward_distributed(
+            input_ids, attn_mask, amp_enabled, amp_dtype
+        )
 
     def _teacher_forward_distributed(
         self,
@@ -515,12 +538,17 @@ class Distiller(
         amp_dtype: torch.dtype,
     ) -> torch.Tensor:
         if not (self.teacher_rank0_only and self.ddp_enabled and dist.is_initialized()):
-            raise RuntimeError("Distributed teacher forwarding requested without active rank-0 ownership.")
+            raise RuntimeError(
+                "Distributed teacher forwarding requested without active rank-0 ownership."
+            )
 
         payload = (input_ids.cpu(), attn_mask.cpu())
         gather_list: Optional[List[Optional[Tuple[torch.Tensor, torch.Tensor]]]]
         if self.ddp_rank == 0:
-            gather_list = cast(List[Optional[Tuple[torch.Tensor, torch.Tensor]]], [None] * self.ddp_world_size)
+            gather_list = cast(
+                List[Optional[Tuple[torch.Tensor, torch.Tensor]]],
+                [None] * self.ddp_world_size,
+            )
         else:
             gather_list = None
         dist.gather_object(payload, gather_list, dst=0)
@@ -528,7 +556,9 @@ class Distiller(
         outputs: Optional[List[Optional[torch.Tensor]]] = None
         if self.ddp_rank == 0:
             if self.teacher is None:
-                raise RuntimeError("Teacher model is unavailable for distributed forward.")
+                raise RuntimeError(
+                    "Teacher model is unavailable for distributed forward."
+                )
             assert gather_list is not None
             outputs = []
             from torch.cuda.amp import autocast
@@ -547,13 +577,17 @@ class Distiller(
                             attention_mask=mask,
                             output_hidden_states=False,
                         ).logits
-                    outputs.append(self._sanitize_logits(logits, "teacher").detach().cpu())
+                    outputs.append(
+                        self._sanitize_logits(logits, "teacher").detach().cpu()
+                    )
 
         recv = [None]
         dist.scatter_object_list(recv, outputs if self.ddp_rank == 0 else None, src=0)
         logits_cpu = recv[0]
         if logits_cpu is None:
-            raise RuntimeError("Distributed teacher failed to return logits for current rank.")
+            raise RuntimeError(
+                "Distributed teacher failed to return logits for current rank."
+            )
         return logits_cpu.to(self.student_device)
 
     def _log_token_selection(
@@ -598,7 +632,9 @@ class Distiller(
         for b_idx, t_idx in selected_positions:
             if 0 <= b_idx < max_batch and 0 <= t_idx < max_pos:
                 keep_mask[b_idx, t_idx] = True
-        self._log_token_selection(keep_mask, valid_next, input_ids, entropies, selection_policy)
+        self._log_token_selection(
+            keep_mask, valid_next, input_ids, entropies, selection_policy
+        )
 
     def _log_topk_debug_info(
         self,
@@ -611,7 +647,10 @@ class Distiller(
         selection_metric: str,
     ) -> None:
         """Record per-document ranking info to help debug top-k token selection."""
-        if self._topk_debug_path is None or self._topk_debug_written >= self._topk_debug_limit:
+        if (
+            self._topk_debug_path is None
+            or self._topk_debug_written >= self._topk_debug_limit
+        ):
             return
         if stat is None:
             return
@@ -632,7 +671,9 @@ class Distiller(
             top_k = min(int(selected_idx.numel()), int(metric_valid.numel()))
             if top_k <= 0:
                 continue
-            top_vals, top_rel_idx = torch.topk(metric_valid, k=top_k, largest=True, sorted=True)
+            top_vals, top_rel_idx = torch.topk(
+                metric_valid, k=top_k, largest=True, sorted=True
+            )
             top_positions = valid_idx[top_rel_idx]
             sel_vals = metric_values[selected_idx].detach().float()
             record: Dict[str, Any] = {
@@ -839,7 +880,9 @@ class Distiller(
         debug_log: bool,
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         if t_log_probs is None or t_pred is None:
-            raise RuntimeError("DKD requires teacher logits; disable offline cache or ensure teacher is available.")
+            raise RuntimeError(
+                "DKD requires teacher logits; disable offline cache or ensure teacher is available."
+            )
         mask = valid_next
         if mask.sum().item() == 0:
             kd_loss = s_pred.sum() * 0.0
@@ -876,13 +919,21 @@ class Distiller(
         # top-k% tokens among valid positions; optionally global threshold via GLS
         # Select positions FIRST, then compute KL only on selected rows (efficient)
         if debug_log:
-            print(f"[DEBUG] top-k-tok START: t_pred shape={t_pred.shape if t_pred is not None else 'None'}, valid_next.sum()={valid_next.sum().item()}", flush=True)
+            print(
+                f"[DEBUG] top-k-tok START: t_pred shape={t_pred.shape if t_pred is not None else 'None'}, valid_next.sum()={valid_next.sum().item()}",
+                flush=True,
+            )
             if t_pred is not None:
-                print(f"[DEBUG] t_pred stats: min={t_pred.min().item():.6f}, max={t_pred.max().item():.6f}, mean={t_pred.mean().item():.6f}", flush=True)
+                print(
+                    f"[DEBUG] t_pred stats: min={t_pred.min().item():.6f}, max={t_pred.max().item():.6f}, mean={t_pred.mean().item():.6f}",
+                    flush=True,
+                )
         pct = max(0.0, min(1.0, self.config.k_percent / 100.0))
         normalize_topk = bool(getattr(self.config, "normalize_topk_by_length", False))
         score_enabled = bool(getattr(self.config, "score_token_selection", False))
-        gls_effective = bool(getattr(self.config, "gls_enabled", False)) and not normalize_topk
+        gls_effective = (
+            bool(getattr(self.config, "gls_enabled", False)) and not normalize_topk
+        )
         policy_bits = [f"k%={float(getattr(self.config, 'k_percent', 0.0)):.2f}"]
         policy_bits.append(f"normalize={'on' if normalize_topk else 'off'}")
         policy_bits.append(f"gls={'on' if gls_effective else 'off'}")
@@ -899,26 +950,32 @@ class Distiller(
         sel_gls_count = 0
         ent_raw: Optional[torch.Tensor] = None
         stat: Optional[torch.Tensor] = None
-        selection_metric = str(getattr(self.config, "topk_tok_selection_metric", "teacher_entropy"))
+        selection_metric = str(
+            getattr(self.config, "topk_tok_selection_metric", "teacher_entropy")
+        )
         if skip_entropy:
             keep_mask = valid_next.clone()
             sel_topk_count = int(valid_next.sum().item())
         else:
             if selection_metric == "student_entropy":
-                from sampledkd.training.entropy_utils import token_entropy
+                from sekd.training.entropy_utils import token_entropy
 
                 # Student logits are already aligned to next-token positions: [B, L-1, V]
                 ent_raw = token_entropy(s_pred.to(self.student_device))
             elif selection_metric == "student_ce":
                 if s_log_probs is None:
-                    raise ValueError("student_ce selection metric requires student log probabilities.")
+                    raise ValueError(
+                        "student_ce selection metric requires student log probabilities."
+                    )
                 targets = input_ids[:, 1:].to(self.student_device)
                 vocab_size = s_log_probs.size(-1)
                 invalid_mask = (targets < 0) | (targets >= vocab_size)
                 invalid_count = int(invalid_mask.sum().item())
                 if invalid_count > 0:
                     if not getattr(self, "_warned_selection_invalid_targets", False):
-                        bad_vals = targets[invalid_mask].detach().to("cpu", non_blocking=True)
+                        bad_vals = (
+                            targets[invalid_mask].detach().to("cpu", non_blocking=True)
+                        )
                         min_bad = int(bad_vals.min().item()) if bad_vals.numel() else 0
                         max_bad = int(bad_vals.max().item()) if bad_vals.numel() else 0
                         sample_vals = bad_vals.unique()
@@ -938,21 +995,31 @@ class Distiller(
                 targets = targets.clamp(min=0, max=vocab_size - 1)
                 target_logp = s_log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
                 ent_raw = (-target_logp).detach()
-            elif selection_metric in ("ce_ratio", "ce_ratio_entropy", "ce_ratio_plus_entropy"):
+            elif selection_metric in (
+                "ce_ratio",
+                "ce_ratio_entropy",
+                "ce_ratio_plus_entropy",
+            ):
                 # CE ratio: CE_s(t) / (CE_t(t) + epsilon)
                 # CE ratio × entropy: CE_s(t) / (CE_t(t) + epsilon) * H_s(t)
                 # CE ratio + entropy: CE_s(t) / (CE_t(t) + epsilon) + H_s(t)
                 if s_log_probs is None:
-                    raise ValueError(f"{selection_metric} selection metric requires student log probabilities.")
+                    raise ValueError(
+                        f"{selection_metric} selection metric requires student log probabilities."
+                    )
                 if t_log_probs is None:
-                    raise ValueError(f"{selection_metric} selection metric requires teacher log probabilities.")
+                    raise ValueError(
+                        f"{selection_metric} selection metric requires teacher log probabilities."
+                    )
                 targets = input_ids[:, 1:].to(self.student_device)
                 vocab_size = s_log_probs.size(-1)
                 invalid_mask = (targets < 0) | (targets >= vocab_size)
                 invalid_count = int(invalid_mask.sum().item())
                 if invalid_count > 0:
                     if not getattr(self, "_warned_selection_invalid_targets", False):
-                        bad_vals = targets[invalid_mask].detach().to("cpu", non_blocking=True)
+                        bad_vals = (
+                            targets[invalid_mask].detach().to("cpu", non_blocking=True)
+                        )
                         min_bad = int(bad_vals.min().item()) if bad_vals.numel() else 0
                         max_bad = int(bad_vals.max().item()) if bad_vals.numel() else 0
                         sample_vals = bad_vals.unique()
@@ -971,18 +1038,23 @@ class Distiller(
                 targets = targets.masked_fill(~valid_next, 0)
                 targets = targets.clamp(min=0, max=vocab_size - 1)
                 # Student CE: -log p_s(target)
-                student_target_logp = s_log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+                student_target_logp = s_log_probs.gather(
+                    -1, targets.unsqueeze(-1)
+                ).squeeze(-1)
                 student_ce = (-student_target_logp).detach()
                 # Teacher CE: -log p_t(target)
                 targets_t = targets.to(t_log_probs.device, non_blocking=True)
-                teacher_target_logp = t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(-1)
+                teacher_target_logp = t_log_probs.gather(
+                    -1, targets_t.unsqueeze(-1)
+                ).squeeze(-1)
                 teacher_ce = (-teacher_target_logp).to(self.student_device).detach()
                 # CE ratio with epsilon for numerical stability
                 eps = 1e-6
                 ce_ratio = student_ce / (teacher_ce + eps)
                 if selection_metric in ("ce_ratio_entropy", "ce_ratio_plus_entropy"):
                     # Normalized student entropy: H_s(t) / log(|V|)
-                    from sampledkd.training.entropy_utils import token_entropy
+                    from sekd.training.entropy_utils import token_entropy
+
                     student_entropy = token_entropy(s_pred.to(self.student_device))
                     log_vocab = float(math.log(vocab_size))
                     student_entropy_norm = student_entropy / log_vocab
@@ -996,9 +1068,15 @@ class Distiller(
                 # Default: teacher entropy (online logits or offline cache)
                 ent_raw = self._entropy_for_selection(input_ids, t_pred)  # [B, L-1]
             if debug_log:
-                print(f"[DEBUG] ent_raw shape={ent_raw.shape}, valid_next.shape={valid_next.shape}", flush=True)
+                print(
+                    f"[DEBUG] ent_raw shape={ent_raw.shape}, valid_next.shape={valid_next.shape}",
+                    flush=True,
+                )
                 valid_ent = ent_raw[valid_next]
-                print(f"[DEBUG] ent_raw[valid_next] stats: min={valid_ent.min().item():.6f}, max={valid_ent.max().item():.6f}, mean={valid_ent.mean().item():.6f}, count={valid_ent.numel()}", flush=True)
+                print(
+                    f"[DEBUG] ent_raw[valid_next] stats: min={valid_ent.min().item():.6f}, max={valid_ent.max().item():.6f}, mean={valid_ent.mean().item():.6f}, count={valid_ent.numel()}",
+                    flush=True,
+                )
 
             if selection_metric == "kl":
                 # Rank by per-position KL between teacher and student distributions.
@@ -1014,10 +1092,12 @@ class Distiller(
             elif score_enabled:
                 # === Two-stage selection for efficiency ===
                 # Stage 1: Prefilter by entropy (cheap, no softmax needed)
-                prefilter_mult = float(getattr(self.config, "score_prefilter_multiplier", 3.0))
+                prefilter_mult = float(
+                    getattr(self.config, "score_prefilter_multiplier", 3.0)
+                )
                 # Stage 2: Compute KL/CE only on prefiltered subset
 
-                stat = torch.full_like(ent_raw, float('-inf'))
+                stat = torch.full_like(ent_raw, float("-inf"))
                 for i in range(valid_next.size(0)):
                     mask_i = valid_next[i]
                     n_valid = int(mask_i.sum().item())
@@ -1030,7 +1110,9 @@ class Distiller(
 
                     valid_idx = torch.where(mask_i)[0]
                     ent_valid = ent_raw[i][mask_i]
-                    _, pre_rel_idx = torch.topk(ent_valid, k=k_pre, largest=True, sorted=False)
+                    _, pre_rel_idx = torch.topk(
+                        ent_valid, k=k_pre, largest=True, sorted=False
+                    )
                     prefilter_idx = valid_idx[pre_rel_idx]  # [k_pre] absolute indices
 
                     # Stage 2: Compute KL/CE only on prefiltered positions (efficient!)
@@ -1041,30 +1123,34 @@ class Distiller(
                     # Gather only prefiltered rows for KL computation
                     # Ensure indices are on the same device as teacher log-probs
                     pre_idx_t = prefilter_idx.to(t_log_probs.device)
-                    t_rows_pre = t_log_probs[i, pre_idx_t, :].to(self.student_device)  # [k_pre, V]
+                    t_rows_pre = t_log_probs[i, pre_idx_t, :].to(
+                        self.student_device
+                    )  # [k_pre, V]
                     s_rows_pre = s_log_probs[i, prefilter_idx, :]  # [k_pre, V]
                     kl_pre = self._kl_directional(t_rows_pre, s_rows_pre)  # [k_pre]
 
                     # Build full-size KL tensor with -inf for non-prefiltered
-                    kl_pos_partial = torch.full((ent_raw.size(1),), float('-inf'), device=self.student_device)
+                    kl_pos_partial = torch.full(
+                        (ent_raw.size(1),), float("-inf"), device=self.student_device
+                    )
                     kl_pos_partial[prefilter_idx] = kl_pre
 
                     # Prepare score context with partial KL
                     score_ctx_i = self._prepare_score_context(
-                        ent_raw[i:i+1],
+                        ent_raw[i : i + 1],
                         kl_pos_partial.unsqueeze(0),
-                        s_log_probs[i:i+1] if s_log_probs is not None else None,
+                        s_log_probs[i : i + 1] if s_log_probs is not None else None,
                         prefilter_mask.unsqueeze(0),
-                        input_ids[i:i+1]
+                        input_ids[i : i + 1],
                     )
                     combined = self._build_score_vector(score_ctx_i, 0, prefilter_mask)
                     if combined is not None:
                         stat[i] = combined
 
-                stat = stat.masked_fill(~valid_next, float('-inf'))
+                stat = stat.masked_fill(~valid_next, float("-inf"))
             else:
                 # Entropy-only ranking (no softmax needed, fully efficient)
-                stat = ent_raw.masked_fill(~valid_next, float('-inf'))
+                stat = ent_raw.masked_fill(~valid_next, float("-inf"))
 
             use_gls = gls_effective
             sel_topk_count = 0
@@ -1093,7 +1179,9 @@ class Distiller(
                         # Curriculum expects a per-position score tensor.
                         # Prefer entropy when available, otherwise fall back to the selection stat.
                         curr_src = ent_raw if ent_raw is not None else stat
-                        curr_mask = self._selection_curriculum_mask(curr_src[i], mask, int(k))
+                        curr_mask = self._selection_curriculum_mask(
+                            curr_src[i], mask, int(k)
+                        )
                         mask = mask & curr_mask
                         n_valid_curr = int(mask.sum().item())
                         if n_valid_curr == 0:
@@ -1126,7 +1214,9 @@ class Distiller(
                             k = max(1, min(n_valid, math.ceil(pct * n_valid)))
                         if self._selection_curriculum_active:
                             curr_src = ent_raw if ent_raw is not None else stat
-                            curr_mask = self._selection_curriculum_mask(curr_src[i], mask, int(k))
+                            curr_mask = self._selection_curriculum_mask(
+                                curr_src[i], mask, int(k)
+                            )
                             mask = mask & curr_mask
                             n_valid_curr = int(mask.sum().item())
                             if n_valid_curr == 0:
@@ -1155,15 +1245,24 @@ class Distiller(
                             else:
                                 k = max(1, min(n_valid, math.ceil(pct * n_valid)))
                             curr_src = ent_raw if ent_raw is not None else stat
-                            curr_mask = self._selection_curriculum_mask(curr_src[i], mask, int(k))
+                            curr_mask = self._selection_curriculum_mask(
+                                curr_src[i], mask, int(k)
+                            )
                             keep_mask[i] = keep_mask[i] & curr_mask
                     sel_gls_count = int(keep_mask.sum().item())
                 # Push current batch stats and optionally log threshold
                 flat_vals = stat[valid_next].detach().float().to("cpu")
                 flat_vals = flat_vals[torch.isfinite(flat_vals)]
                 self._gls_push(flat_vals)
-                if getattr(self.config, "gls_log_threshold", False) and ('thr' in locals()) and thr is not None and self.logger:
-                    self.logger.log_scalar("train/gls_threshold", float(thr), self.global_step)
+                if (
+                    getattr(self.config, "gls_log_threshold", False)
+                    and ("thr" in locals())
+                    and thr is not None
+                    and self.logger
+                ):
+                    self.logger.log_scalar(
+                        "train/gls_threshold", float(thr), self.global_step
+                    )
 
         if not skip_entropy:
             self._log_topk_debug_info(
@@ -1179,7 +1278,10 @@ class Distiller(
         self._last_ce_selection_mask = keep_mask
         rows = keep_mask.nonzero(as_tuple=False)  # [P, 2] -> (b, t)
         if rows.numel() == 0:
-            print(f"[DEBUG] top-k-tok: keep_mask has NO selected positions! valid_next.sum()={valid_next.sum().item()}", flush=True)
+            print(
+                f"[DEBUG] top-k-tok: keep_mask has NO selected positions! valid_next.sum()={valid_next.sum().item()}",
+                flush=True,
+            )
             kd_loss = s_pred.sum() * 0.0
             self._kl_zero_counter = 0
         else:
@@ -1215,7 +1317,9 @@ class Distiller(
                 # UDKD loss: uncertainty-driven decoupled KD
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets_udkd = student_targets[b_idx, t_idx]
-                udkd_metric = str(getattr(self.config, "udkd_uncertainty_metric", "unc"))
+                udkd_metric = str(
+                    getattr(self.config, "udkd_uncertainty_metric", "unc")
+                )
                 udkd_loss_fn = UDKDLoss(uncertainty_metric=udkd_metric)
                 teacher_probs = t_rows.exp()
                 student_probs = s_rows.exp()
@@ -1225,11 +1329,14 @@ class Distiller(
                 kd_loss = udkd_total.mean()
                 # Log UDKD components
                 if self.logger:
-                    self.logger.log({
-                        "train/udkd_tckd": float(udkd_tckd.mean().item()),
-                        "train/udkd_nckd": float(udkd_nckd.mean().item()),
-                        "train/udkd_gate_mean": float(udkd_gate.mean().item()),
-                    }, self.global_step)
+                    self.logger.log(
+                        {
+                            "train/udkd_tckd": float(udkd_tckd.mean().item()),
+                            "train/udkd_nckd": float(udkd_nckd.mean().item()),
+                            "train/udkd_gate_mean": float(udkd_gate.mean().item()),
+                        },
+                        self.global_step,
+                    )
             else:
                 kl_per_pos = self._kl_directional(t_rows, s_rows)
                 # Weighted KD: optionally weight each token's KL by uncertainty
@@ -1247,13 +1354,17 @@ class Distiller(
                             weights = ent_raw[b_idx, t_idx]
                         else:
                             t_probs = t_rows.exp()
-                            weights = -(t_probs * torch.log(t_probs.clamp_min(1e-8))).sum(dim=-1)
+                            weights = -(
+                                t_probs * torch.log(t_probs.clamp_min(1e-8))
+                            ).sum(dim=-1)
                     elif metric == "unc":
                         t_probs = t_rows.exp()
                         weights = 1.0 - t_probs.max(dim=-1).values
                     elif metric == "student_entropy":
                         s_probs = s_rows.exp()
-                        weights = -(s_probs * torch.log(s_probs.clamp_min(1e-8))).sum(dim=-1)
+                        weights = -(s_probs * torch.log(s_probs.clamp_min(1e-8))).sum(
+                            dim=-1
+                        )
                     else:
                         raise ValueError(
                             "weighted_kd_metric must be one of ['entropy', 'unc', 'student_entropy'], "
@@ -1261,7 +1372,9 @@ class Distiller(
                         )
 
                     weights = weights.float().clamp_min(1e-8)
-                    kd_loss = (kl_per_pos * weights).sum() / weights.sum().clamp_min(1e-12)
+                    kd_loss = (kl_per_pos * weights).sum() / weights.sum().clamp_min(
+                        1e-12
+                    )
             kd_scalar = float(kd_loss.detach().item())
             diff = (t_rows - s_rows).detach().abs()
             max_abs_diff = float(diff.max().item()) if diff.numel() > 0 else 0.0
@@ -1292,13 +1405,18 @@ class Distiller(
 
         # Log selection counters (per batch)
         if self.logger:
-            self.logger.log({
-                "train/selected_tokens_topk": float(sel_topk_count),
-                "train/selected_tokens_gls": float(sel_gls_count),
-            }, self.global_step)
+            self.logger.log(
+                {
+                    "train/selected_tokens_topk": float(sel_topk_count),
+                    "train/selected_tokens_gls": float(sel_gls_count),
+                },
+                self.global_step,
+            )
 
         # Log token selection for analysis
-        self._log_token_selection(keep_mask, valid_next, input_ids, ent_raw, selection_policy)
+        self._log_token_selection(
+            keep_mask, valid_next, input_ids, ent_raw, selection_policy
+        )
 
         return kd_loss, None
 
@@ -1323,7 +1441,7 @@ class Distiller(
 
         # Create boolean mask for positions to include in KD loss
         keep_mask = torch.zeros_like(valid_next, dtype=torch.bool)  # [B, L-1]
-        
+
         Bsz = t_log_probs.size(0)
         for i in range(Bsz):
             valid_next_i = valid_next[i]
@@ -1334,50 +1452,80 @@ class Distiller(
                 # === Two-stage selection for efficiency ===
                 # Stage 1: Prefilter by entropy to bucket range
                 ent_valid = ent_raw[i][valid_next_i].float()
-                lower_thr = torch.quantile(ent_valid, self.config.bucket_lower_percent / 100.0)
-                upper_thr = torch.quantile(ent_valid, self.config.bucket_upper_percent / 100.0)
-                
+                lower_thr = torch.quantile(
+                    ent_valid, self.config.bucket_lower_percent / 100.0
+                )
+                upper_thr = torch.quantile(
+                    ent_valid, self.config.bucket_upper_percent / 100.0
+                )
+
                 valid_idx = torch.where(valid_next_i)[0]
                 prefilter_mask_rel = (ent_valid >= lower_thr) & (ent_valid <= upper_thr)
-                
+
                 if not prefilter_mask_rel.any():
                     continue
-                
-                prefilter_idx = valid_idx[prefilter_mask_rel]  # Absolute indices in bucket
-                
+
+                prefilter_idx = valid_idx[
+                    prefilter_mask_rel
+                ]  # Absolute indices in bucket
+
                 # Stage 2: Compute KL/CE only on bucket positions (efficient!)
                 pre_idx_t = prefilter_idx.to(t_log_probs.device)
-                t_rows_pre = t_log_probs[i, pre_idx_t, :].to(self.student_device)  # [k_bucket, V]
+                t_rows_pre = t_log_probs[i, pre_idx_t, :].to(
+                    self.student_device
+                )  # [k_bucket, V]
                 s_rows_pre = s_log_probs[i, prefilter_idx, :]  # [k_bucket, V]
                 kl_pre = self._kl_directional(t_rows_pre, s_rows_pre)  # [k_bucket]
-                
+
                 # Build full-size KL tensor
-                kl_pos_partial = torch.full((ent_raw.size(1),), float('-inf'), device=self.student_device)
+                kl_pos_partial = torch.full(
+                    (ent_raw.size(1),), float("-inf"), device=self.student_device
+                )
                 kl_pos_partial[prefilter_idx] = kl_pre
-                
+
                 # Create prefilter mask for score context
                 prefilter_mask_full = torch.zeros_like(valid_next_i, dtype=torch.bool)
                 prefilter_mask_full[prefilter_idx] = True
-                
+
                 # Prepare score context with partial KL
                 score_ctx_i = self._prepare_score_context(
-                    ent_raw[i:i+1],
+                    ent_raw[i : i + 1],
                     kl_pos_partial.unsqueeze(0),
-                    s_log_probs[i:i+1] if s_log_probs is not None else None,
+                    s_log_probs[i : i + 1] if s_log_probs is not None else None,
                     prefilter_mask_full.unsqueeze(0),
-                    input_ids[i:i+1]
+                    input_ids[i : i + 1],
                 )
                 combined = self._build_score_vector(score_ctx_i, 0, prefilter_mask_full)
                 if combined is None:
                     continue
-                
+
                 # Apply bucket thresholds to combined score
                 vec = combined[prefilter_mask_full].float()
                 if vec.numel() < 1:
                     continue
-                score_lower = torch.quantile(vec, max(0.0, (self.config.bucket_lower_percent - self.config.bucket_lower_percent) / 100.0))
-                score_upper = torch.quantile(vec, min(1.0, (self.config.bucket_upper_percent - self.config.bucket_lower_percent) / (100.0 - self.config.bucket_lower_percent)))
-                
+                score_lower = torch.quantile(
+                    vec,
+                    max(
+                        0.0,
+                        (
+                            self.config.bucket_lower_percent
+                            - self.config.bucket_lower_percent
+                        )
+                        / 100.0,
+                    ),
+                )
+                score_upper = torch.quantile(
+                    vec,
+                    min(
+                        1.0,
+                        (
+                            self.config.bucket_upper_percent
+                            - self.config.bucket_lower_percent
+                        )
+                        / (100.0 - self.config.bucket_lower_percent),
+                    ),
+                )
+
                 # Final selection within prefiltered set
                 final_sel = (vec >= score_lower) & (vec <= score_upper)
                 if final_sel.any():
@@ -1385,8 +1533,12 @@ class Distiller(
             else:
                 # Entropy-only bucket (no softmax needed)
                 vec = ent_raw[i][valid_next_i].float()
-                lower_thr = torch.quantile(vec, self.config.bucket_lower_percent / 100.0)
-                upper_thr = torch.quantile(vec, self.config.bucket_upper_percent / 100.0)
+                lower_thr = torch.quantile(
+                    vec, self.config.bucket_lower_percent / 100.0
+                )
+                upper_thr = torch.quantile(
+                    vec, self.config.bucket_upper_percent / 100.0
+                )
 
                 keep_idx = torch.where(valid_next_i)[0]
                 sel_mask = (vec >= lower_thr) & (vec <= upper_thr)
@@ -1427,15 +1579,19 @@ class Distiller(
         score_ctx = None
         ent_raw = None
         if score_enabled or self._selection_curriculum_active:
-            ent_raw = self._entropy_for_selection(input_ids, t_pred)  # [B, L-1] for context only
+            ent_raw = self._entropy_for_selection(
+                input_ids, t_pred
+            )  # [B, L-1] for context only
         if score_enabled:
             assert ent_raw is not None
             kl_pos_for_score = self._kl_directional(t_log_probs, s_log_probs)
-            score_ctx = self._prepare_score_context(ent_raw, kl_pos_for_score, s_log_probs, valid_next, input_ids)
+            score_ctx = self._prepare_score_context(
+                ent_raw, kl_pos_for_score, s_log_probs, valid_next, input_ids
+            )
 
         # Create boolean mask for positions to include in KD loss
         keep_mask = torch.zeros_like(valid_next, dtype=torch.bool)  # [B, L-1]
-        
+
         Bsz = t_log_probs.size(0)
         for i in range(Bsz):
             valid_next_i = valid_next[i]
@@ -1456,7 +1612,9 @@ class Distiller(
                 score_valid = combined[valid_next_i].float()
                 if self._selection_curriculum_active and ent_raw is not None:
                     ent_valid = ent_raw[i][valid_next_i]
-                    weights = self._selection_curriculum_sampling_weights(ent_valid).to(score_valid.device)
+                    weights = self._selection_curriculum_sampling_weights(ent_valid).to(
+                        score_valid.device
+                    )
                     score_valid = score_valid * weights
                 # turn scores into sampling probs
                 s = score_valid - score_valid.min()
@@ -1467,12 +1625,18 @@ class Distiller(
             else:
                 if self._selection_curriculum_active and ent_raw is not None:
                     ent_valid = ent_raw[i][valid_next_i]
-                    weights = self._selection_curriculum_sampling_weights(ent_valid).to(self.student_device)
+                    weights = self._selection_curriculum_sampling_weights(ent_valid).to(
+                        self.student_device
+                    )
                     probs = weights / weights.sum()
-                    rel = torch.multinomial(probs, num_samples=k_count, replacement=False)
+                    rel = torch.multinomial(
+                        probs, num_samples=k_count, replacement=False
+                    )
                     selected_indices = valid_indices[rel]
                 else:
-                    perm = torch.randperm(len(valid_indices), device=self.student_device)
+                    perm = torch.randperm(
+                        len(valid_indices), device=self.student_device
+                    )
                     selected_indices = valid_indices[perm[:k_count]]
 
             keep_mask[i, selected_indices] = True
@@ -1491,12 +1655,16 @@ class Distiller(
             if use_dkd:
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets = student_targets[b_idx, t_idx]
-                kd_loss = self._compute_dkd_total_rows(t_rows.exp(), s_rows.exp(), targets).mean()
+                kd_loss = self._compute_dkd_total_rows(
+                    t_rows.exp(), s_rows.exp(), targets
+                ).mean()
             elif bool(getattr(self.config, "udkd_loss", False)):
                 # UDKD loss: uncertainty-driven decoupled KD
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets_udkd = student_targets[b_idx, t_idx]
-                udkd_metric = str(getattr(self.config, "udkd_uncertainty_metric", "unc"))
+                udkd_metric = str(
+                    getattr(self.config, "udkd_uncertainty_metric", "unc")
+                )
                 udkd_loss_fn = UDKDLoss(uncertainty_metric=udkd_metric)
                 teacher_probs = t_rows.exp()
                 student_probs = s_rows.exp()
@@ -1505,11 +1673,14 @@ class Distiller(
                 )
                 kd_loss = udkd_total.mean()
                 if self.logger:
-                    self.logger.log({
-                        "train/udkd_tckd": float(udkd_tckd.mean().item()),
-                        "train/udkd_nckd": float(udkd_nckd.mean().item()),
-                        "train/udkd_gate_mean": float(udkd_gate.mean().item()),
-                    }, self.global_step)
+                    self.logger.log(
+                        {
+                            "train/udkd_tckd": float(udkd_tckd.mean().item()),
+                            "train/udkd_nckd": float(udkd_nckd.mean().item()),
+                            "train/udkd_gate_mean": float(udkd_gate.mean().item()),
+                        },
+                        self.global_step,
+                    )
             else:
                 kd_loss = self._kl_directional(t_rows, s_rows).mean()
         return kd_loss, None
@@ -1528,17 +1699,24 @@ class Distiller(
         debug_log: bool,
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         if t_log_probs is None:
-            raise RuntimeError("AT-KD requires teacher log-probs; disable offline cache or ensure teacher is available.")
+            raise RuntimeError(
+                "AT-KD requires teacher log-probs; disable offline cache or ensure teacher is available."
+            )
         rows = valid_next.nonzero(as_tuple=False)
         if rows.numel() == 0:
             kd_loss = s_pred.sum() * 0.0
         else:
-            batch_idx, pos_idx = rows[:, 0], rows[:, 1]  # batch and position indices of valid tokens
+            batch_idx, pos_idx = (
+                rows[:, 0],
+                rows[:, 1],
+            )  # batch and position indices of valid tokens
             device_t = t_log_probs.device
             batch_idx_t = batch_idx.to(device_t)
             pos_idx_t = pos_idx.to(device_t)
             if t_pred is None:
-                raise RuntimeError("AT-KD requires teacher logits for T=1 probability computation.")
+                raise RuntimeError(
+                    "AT-KD requires teacher logits for T=1 probability computation."
+                )
             t_rows_logits = t_pred[batch_idx_t, pos_idx_t, :].to(self.student_device)
             s_rows_logits = s_pred[batch_idx, pos_idx, :].to(self.student_device)
 
@@ -1552,13 +1730,21 @@ class Distiller(
             row_indices = torch.arange(P_total, device=self.student_device)
             # Ground-truth target ids
             # input_ids[:, 1:] gives the next-token targets; index by (batch_idx, pos_idx) to get gold labels
-            gold_target_ids = input_ids[:, 1:].to(self.student_device)[batch_idx, pos_idx]
+            gold_target_ids = input_ids[:, 1:].to(self.student_device)[
+                batch_idx, pos_idx
+            ]
             teacher_tgt = teacher_probs[row_indices, gold_target_ids]
             student_tgt = student_probs[row_indices, gold_target_ids]
             # UnC metric from "Revisiting KD in LLMs": 1 - p(target)
             uncertainty = 1.0 - teacher_tgt
 
-            hard_pct = float(getattr(self.config, "atkd_hard_percent", getattr(self.config, "k_percent", 50)))
+            hard_pct = float(
+                getattr(
+                    self.config,
+                    "atkd_hard_percent",
+                    getattr(self.config, "k_percent", 50),
+                )
+            )
             hard_pct = max(0.0, min(100.0, hard_pct))
             if P_total == 0 or hard_pct <= 0.0:
                 hard_count_req = 0
@@ -1568,11 +1754,15 @@ class Distiller(
                 hard_count_req = int(math.ceil((hard_pct / 100.0) * P_total))
                 hard_count_req = max(1, min(P_total, hard_count_req))
 
-            hard_mask = torch.zeros(P_total, dtype=torch.bool, device=self.student_device)
+            hard_mask = torch.zeros(
+                P_total, dtype=torch.bool, device=self.student_device
+            )
             if hard_count_req >= P_total:
                 hard_mask[:] = True
             elif hard_count_req > 0:
-                _, hard_idx = torch.topk(uncertainty, hard_count_req, largest=True, sorted=False)
+                _, hard_idx = torch.topk(
+                    uncertainty, hard_count_req, largest=True, sorted=False
+                )
                 hard_mask[hard_idx] = True
             easy_mask = ~hard_mask
             hard_count = int(hard_mask.sum().item())
@@ -1583,11 +1773,21 @@ class Distiller(
             student_rest = (1.0 - student_tgt).clamp_min(0.0)
             teacher_bin = torch.stack([teacher_tgt, teacher_rest], dim=-1)
             student_bin = torch.stack([student_tgt, student_rest], dim=-1)
-            teacher_bin = teacher_bin / teacher_bin.sum(dim=-1, keepdim=True).clamp_min(1e-9)
-            student_bin = student_bin / student_bin.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+            teacher_bin = teacher_bin / teacher_bin.sum(dim=-1, keepdim=True).clamp_min(
+                1e-9
+            )
+            student_bin = student_bin / student_bin.sum(dim=-1, keepdim=True).clamp_min(
+                1e-9
+            )
             log_teacher_bin = torch.log(teacher_bin.clamp_min(1e-9))
             log_student_bin = torch.log(student_bin.clamp_min(1e-9))
-            kl_bin = F.kl_div(log_student_bin, log_teacher_bin, log_target=True, reduction="none").sum(-1).to(s_pred.dtype)
+            kl_bin = (
+                F.kl_div(
+                    log_student_bin, log_teacher_bin, log_target=True, reduction="none"
+                )
+                .sum(-1)
+                .to(s_pred.dtype)
+            )
 
             # NCKD: distribution over non-target classes (vocab minus target) - uses ground-truth target per DKD paper
             teacher_off = teacher_probs.clone()
@@ -1597,15 +1797,25 @@ class Distiller(
             teacher_off_sum = teacher_off.sum(dim=-1)
             student_off_sum = student_off.sum(dim=-1)
 
-            kl_off = torch.zeros(P_total, device=self.student_device, dtype=s_pred.dtype)
+            kl_off = torch.zeros(
+                P_total, device=self.student_device, dtype=s_pred.dtype
+            )
             valid_off = teacher_off_sum > 1e-8
             if valid_off.any():
                 idx_valid = valid_off.nonzero(as_tuple=False).squeeze(-1)
-                t_hat = teacher_off[idx_valid] / teacher_off_sum[idx_valid].unsqueeze(-1)
-                s_hat = student_off[idx_valid] / student_off_sum[idx_valid].unsqueeze(-1).clamp_min(1e-8)
+                t_hat = teacher_off[idx_valid] / teacher_off_sum[idx_valid].unsqueeze(
+                    -1
+                )
+                s_hat = student_off[idx_valid] / student_off_sum[idx_valid].unsqueeze(
+                    -1
+                ).clamp_min(1e-8)
                 log_t_hat = torch.log(t_hat.clamp_min(1e-9))
                 log_s_hat = torch.log(s_hat.clamp_min(1e-9))
-                kl_vals = F.kl_div(log_s_hat, log_t_hat, log_target=True, reduction="none").sum(-1).to(s_pred.dtype)
+                kl_vals = (
+                    F.kl_div(log_s_hat, log_t_hat, log_target=True, reduction="none")
+                    .sum(-1)
+                    .to(s_pred.dtype)
+                )
                 kl_off[idx_valid] = kl_vals
 
             lambda_easy = float(getattr(self.config, "atkd_loss_lambda", 0.2))
@@ -1643,7 +1853,9 @@ class Distiller(
                     "train/atkd_hard_percent": hard_pct,
                 }
                 if hard_count > 0:
-                    metrics["train/atkd_unc_threshold"] = float(uncertainty[hard_mask].min().item())
+                    metrics["train/atkd_unc_threshold"] = float(
+                        uncertainty[hard_mask].min().item()
+                    )
                 if easy_avg is not None:
                     metrics["train/atkd_easy_loss"] = float(easy_avg.item())
                 if hard_avg is not None:
@@ -1666,7 +1878,7 @@ class Distiller(
     ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
         # RS-KD over POSITIONS: sample K% positions by distribution q(i)
         # Select positions FIRST with importance weights, then compute KL only on selected rows
-        
+
         # Determine selection metric based on offline_cache_mode
         ocm = getattr(self.config, "offline_cache_mode", "entropy")
         if ocm == "unc":
@@ -1683,7 +1895,9 @@ class Distiller(
         score_ctx = None
         if score_enabled:
             kl_pos_for_score = self._kl_directional(t_log_probs, s_log_probs)
-            score_ctx = self._prepare_score_context(selection_scores, kl_pos_for_score, s_log_probs, valid_next, input_ids)
+            score_ctx = self._prepare_score_context(
+                selection_scores, kl_pos_for_score, s_log_probs, valid_next, input_ids
+            )
 
         # Build per-position importance weights
         Bsz = t_pred.size(0)
@@ -1711,7 +1925,7 @@ class Distiller(
         selected_positions: List[Tuple[int, int]] = []  # (b, t)
         match_full_kd = bool(getattr(self.config, "pos_rs_match_full_kd", False))
         selected_q_values: List[float] = []
-        
+
         for i in range(Bsz):
             valid_next_i = valid_next[i]  # [L-1] bool of valid positions
             if valid_next_i.sum().item() < 3:
@@ -1729,7 +1943,9 @@ class Distiller(
 
             valid_idx = torch.where(valid_next_i)[0]
             if bucket_bounds is not None:
-                filtered_vec, filtered_idx, filtered = self._apply_rs_bucket_filter(vec, valid_idx, bucket_bounds)
+                filtered_vec, filtered_idx, filtered = self._apply_rs_bucket_filter(
+                    vec, valid_idx, bucket_bounds
+                )
                 if filtered:
                     vec = filtered_vec
                     valid_idx = filtered_idx
@@ -1755,7 +1971,7 @@ class Distiller(
                 k_count = min(valid_count, shared_quota)
             else:
                 k_count = max(1, min(valid_count, math.ceil(pct * valid_count)))
-            
+
             # Sampling WITH replacement: duplicates => multiple contributions (q-weighted KD)
             sel_rel = torch.multinomial(q, num_samples=k_count, replacement=True)  # [k]
             selected_abs = valid_idx[sel_rel]  # [k]
@@ -1771,8 +1987,16 @@ class Distiller(
         if len(selected_positions) == 0:
             kd_loss = s_pred.sum() * 0.0
         else:
-            b_indices = torch.tensor([p[0] for p in selected_positions], dtype=torch.long, device=self.student_device)
-            t_indices = torch.tensor([p[1] for p in selected_positions], dtype=torch.long, device=self.student_device)
+            b_indices = torch.tensor(
+                [p[0] for p in selected_positions],
+                dtype=torch.long,
+                device=self.student_device,
+            )
+            t_indices = torch.tensor(
+                [p[1] for p in selected_positions],
+                dtype=torch.long,
+                device=self.student_device,
+            )
             # Move indices to teacher device for gather
             b_idx_t = b_indices.to(t_log_probs.device)
             t_idx_t = t_indices.to(t_log_probs.device)
@@ -1783,7 +2007,9 @@ class Distiller(
                 # UDKD loss: uncertainty-driven decoupled KD
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets_udkd = student_targets[b_indices, t_indices]
-                udkd_metric = str(getattr(self.config, "udkd_uncertainty_metric", "unc"))
+                udkd_metric = str(
+                    getattr(self.config, "udkd_uncertainty_metric", "unc")
+                )
                 udkd_loss_fn = UDKDLoss(uncertainty_metric=udkd_metric)
                 teacher_probs = t_rows.exp()
                 student_probs = s_rows.exp()
@@ -1792,22 +2018,31 @@ class Distiller(
                 )
                 kd_loss = udkd_total.mean()
                 if self.logger:
-                    self.logger.log({
-                        "train/udkd_tckd": float(udkd_tckd.mean().item()),
-                        "train/udkd_nckd": float(udkd_nckd.mean().item()),
-                        "train/udkd_gate_mean": float(udkd_gate.mean().item()),
-                    }, self.global_step)
+                    self.logger.log(
+                        {
+                            "train/udkd_tckd": float(udkd_tckd.mean().item()),
+                            "train/udkd_nckd": float(udkd_nckd.mean().item()),
+                            "train/udkd_gate_mean": float(udkd_gate.mean().item()),
+                        },
+                        self.global_step,
+                    )
             else:
                 kl_per_pos = self._kl_directional(t_rows, s_rows)  # [P]
                 if match_full_kd and selected_q_values:
-                    q_tensor = torch.tensor(selected_q_values, dtype=kl_per_pos.dtype, device=self.student_device)
+                    q_tensor = torch.tensor(
+                        selected_q_values,
+                        dtype=kl_per_pos.dtype,
+                        device=self.student_device,
+                    )
                     denom = torch.clamp(q_tensor, min=1e-8)
                     kd_loss = (kl_per_pos / denom).mean()
                 else:
                     # Simple mean over all sampled positions (duplicates count multiple times)
                     kd_loss = kl_per_pos.mean()
         log_ent = ent_raw if ocm != "unc" else None
-        self._log_selected_positions(selected_positions, valid_next, input_ids, log_ent, selection_policy)
+        self._log_selected_positions(
+            selected_positions, valid_next, input_ids, log_ent, selection_policy
+        )
         return kd_loss, None
 
     def _kd_loss_pos_rs_kd_dkd(
@@ -1840,9 +2075,13 @@ class Distiller(
         score_ctx = None
         if score_enabled:
             kl_pos_for_score = self._kl_directional(t_log_probs, s_log_probs)
-            score_ctx = self._prepare_score_context(selection_scores, kl_pos_for_score, s_log_probs, valid_next, input_ids)
+            score_ctx = self._prepare_score_context(
+                selection_scores, kl_pos_for_score, s_log_probs, valid_next, input_ids
+            )
 
-        selected_positions: List[Tuple[int, int]] = []  # (b, t) - no weights for q-weighted KD
+        selected_positions: List[
+            Tuple[int, int]
+        ] = []  # (b, t) - no weights for q-weighted KD
         match_full_kd = bool(getattr(self.config, "pos_rs_match_full_kd", False))
         selected_q_values: List[float] = []
         Bsz = t_pred.size(0)
@@ -1883,7 +2122,9 @@ class Distiller(
                 vec = selection_scores[i][valid_next_i].float()
 
             if bucket_bounds is not None:
-                vec, valid_idx, _ = self._apply_rs_bucket_filter(vec, valid_idx, bucket_bounds)
+                vec, valid_idx, _ = self._apply_rs_bucket_filter(
+                    vec, valid_idx, bucket_bounds
+                )
 
             valid_count = int(valid_idx.numel())
             if valid_count < 1:
@@ -1903,7 +2144,7 @@ class Distiller(
                 k_count = min(valid_count, shared_quota)
             else:
                 k_count = max(1, min(valid_count, math.ceil(pct * valid_count)))
-            
+
             # Sampling WITH replacement: duplicates => multiple contributions (q-weighted KD)
             sel_rel = torch.multinomial(q, num_samples=k_count, replacement=True)
             sel_abs = valid_idx[sel_rel]
@@ -1916,25 +2157,39 @@ class Distiller(
         if len(selected_positions) == 0:
             kd_loss = s_pred.sum() * 0.0
         else:
-            b_indices = torch.tensor([p[0] for p in selected_positions], dtype=torch.long, device=self.student_device)
-            t_indices = torch.tensor([p[1] for p in selected_positions], dtype=torch.long, device=self.student_device)
+            b_indices = torch.tensor(
+                [p[0] for p in selected_positions],
+                dtype=torch.long,
+                device=self.student_device,
+            )
+            t_indices = torch.tensor(
+                [p[1] for p in selected_positions],
+                dtype=torch.long,
+                device=self.student_device,
+            )
             device_t = t_log_probs.device
             b_idx_t = b_indices.to(device_t)
             t_idx_t = t_indices.to(device_t)
-            t_rows_probs = torch.exp(t_log_probs[b_idx_t, t_idx_t, :]).to(self.student_device)
+            t_rows_probs = torch.exp(t_log_probs[b_idx_t, t_idx_t, :]).to(
+                self.student_device
+            )
             s_rows_probs = torch.exp(s_log_probs[b_indices, t_indices, :])
             student_targets = input_ids[:, 1:].to(self.student_device)
             targets = student_targets[b_indices, t_indices]
             kd_rows = self._compute_dkd_total_rows(t_rows_probs, s_rows_probs, targets)
             if match_full_kd and selected_q_values:
-                q_tensor = torch.tensor(selected_q_values, dtype=kd_rows.dtype, device=self.student_device)
+                q_tensor = torch.tensor(
+                    selected_q_values, dtype=kd_rows.dtype, device=self.student_device
+                )
                 denom = torch.clamp(q_tensor, min=1e-8)
                 kd_loss = (kd_rows / denom).mean()
             else:
                 # Simple mean over all sampled positions (duplicates count multiple times)
                 kd_loss = kd_rows.mean()
         log_ent = ent_raw if (not (ocm == "unc")) else None
-        self._log_selected_positions(selected_positions, valid_next, input_ids, log_ent, selection_policy)
+        self._log_selected_positions(
+            selected_positions, valid_next, input_ids, log_ent, selection_policy
+        )
         return kd_loss, None
 
     def _kd_loss_linucb(
@@ -1962,8 +2217,14 @@ class Distiller(
         # Teacher/student CE and KL are the contextual features consumed by the bandit.
         # Use log_probs at temperature T (already computed) for consistency
         targets_t = targets.to(t_log_probs.device, non_blocking=True)
-        teacher_ce = (-t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(-1)).to(self.student_device).detach()
-        student_ce = (-s_log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)).detach()
+        teacher_ce = (
+            (-t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(-1))
+            .to(self.student_device)
+            .detach()
+        )
+        student_ce = (
+            -s_log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+        ).detach()
 
         kd_terms, metrics, selection = self.bandit_manager.select_tokens(
             input_ids=input_ids,
@@ -1992,7 +2253,9 @@ class Distiller(
                 s_rows = s_log_probs[b_idx_student, t_idx_student, :]
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets_sel = student_targets[b_idx_student, t_idx_student]
-                kd_rows = self._compute_dkd_total_rows(t_rows.exp(), s_rows.exp(), targets_sel)
+                kd_rows = self._compute_dkd_total_rows(
+                    t_rows.exp(), s_rows.exp(), targets_sel
+                )
                 kd_loss = kd_rows.mean() if kd_rows.numel() > 0 else s_pred.sum() * 0.0
         elif udkd_enabled:
             # UDKD loss for linucb
@@ -2009,7 +2272,9 @@ class Distiller(
                 s_rows = s_log_probs[b_idx_student, t_idx_student, :]
                 student_targets = input_ids[:, 1:].to(self.student_device)
                 targets_udkd = student_targets[b_idx_student, t_idx_student]
-                udkd_metric = str(getattr(self.config, "udkd_uncertainty_metric", "unc"))
+                udkd_metric = str(
+                    getattr(self.config, "udkd_uncertainty_metric", "unc")
+                )
                 udkd_loss_fn = UDKDLoss(uncertainty_metric=udkd_metric)
                 teacher_probs = t_rows.exp()
                 student_probs = s_rows.exp()
@@ -2018,11 +2283,14 @@ class Distiller(
                 )
                 kd_loss = udkd_total.mean()
                 if self.logger:
-                    self.logger.log({
-                        "train/udkd_tckd": float(udkd_tckd.mean().item()),
-                        "train/udkd_nckd": float(udkd_nckd.mean().item()),
-                        "train/udkd_gate_mean": float(udkd_gate.mean().item()),
-                    }, self.global_step)
+                    self.logger.log(
+                        {
+                            "train/udkd_tckd": float(udkd_tckd.mean().item()),
+                            "train/udkd_nckd": float(udkd_nckd.mean().item()),
+                            "train/udkd_gate_mean": float(udkd_gate.mean().item()),
+                        },
+                        self.global_step,
+                    )
         else:
             kd_loss = torch.cat(kd_terms).mean() if kd_terms else s_pred.sum() * 0.0
         extra = metrics or None
@@ -2045,7 +2313,9 @@ class Distiller(
         rank_is_zero = (not self.ddp_enabled) or (self.ddp_rank == 0)
         build_cache_on_rank = (not self.ddp_enabled) or (self.ddp_rank == 0)
         if rank_is_zero and self._max_train_seconds is not None:
-            print(f"[timelimit] Max wall-clock training time: {self._max_train_seconds / 3600.0:.2f}h")
+            print(
+                f"[timelimit] Max wall-clock training time: {self._max_train_seconds / 3600.0:.2f}h"
+            )
         # Optional frozen-student pre-pass for skipping a fraction of samples.
         if self.sample_skipper is not None:
             self.sample_skipper.prepare(rank_is_zero=rank_is_zero)
@@ -2063,7 +2333,9 @@ class Distiller(
 
         overall_train_elapsed = time.time() - overall_train_start
         if rank_is_zero:
-            print(f"[distill] Total training duration: {overall_train_elapsed:.2f}s for {epochs} epoch(s)")
+            print(
+                f"[distill] Total training duration: {overall_train_elapsed:.2f}s for {epochs} epoch(s)"
+            )
             self._log_peak_memory_summary(overall_train_elapsed)
             self._write_efficiency_row(overall_train_elapsed)
 
@@ -2071,7 +2343,11 @@ class Distiller(
         if not bool(getattr(self.config, "log_efficiency_csv", False)):
             return
 
-        csv_path = Path(getattr(self.config, "efficiency_csv_path", "results/table_efficiency_test.csv"))
+        csv_path = Path(
+            getattr(
+                self.config, "efficiency_csv_path", "results/table_efficiency_test.csv"
+            )
+        )
         csv_path.parent.mkdir(parents=True, exist_ok=True)
 
         display_name = os.getenv("RUN_DISPLAY_NAME", "").strip()
@@ -2081,19 +2357,27 @@ class Distiller(
         prepass_tokens = 0
         prepass_strategy = None
         if self.sample_skipper is not None:
-            forward_s = float(getattr(self.sample_skipper, "prepass_forward_s", 0.0) or 0.0)
+            forward_s = float(
+                getattr(self.sample_skipper, "prepass_forward_s", 0.0) or 0.0
+            )
             prepass_tokens = int(getattr(self.sample_skipper, "prepass_tokens", 0) or 0)
             prepass_strategy = getattr(self.sample_skipper, "prepass_strategy", None)
 
         iterations = int(self._total_train_iterations)
         total_wall_min = float(overall_train_elapsed_s) / 60.0
-        forward_min = float(forward_s) / 60.0 if self.sample_skipper is not None else 0.0
+        forward_min = (
+            float(forward_s) / 60.0 if self.sample_skipper is not None else 0.0
+        )
 
         student_params = self._param_count(self._student_base)
-        teacher_params = self._param_count(self.teacher) if self.teacher is not None else 0
+        teacher_params = (
+            self._param_count(self.teacher) if self.teacher is not None else 0
+        )
 
         train_tokens = int(self._total_train_tokens)
-        train_flops = train_tokens * (6 * student_params + (2 * teacher_params if teacher_params else 0))
+        train_flops = train_tokens * (
+            6 * student_params + (2 * teacher_params if teacher_params else 0)
+        )
 
         prepass_flops = 0
         if prepass_tokens > 0:
@@ -2106,7 +2390,9 @@ class Distiller(
         # Compute peak memory statistics
         peak_mem_avg = 0.0
         if self._peak_memory_samples:
-            peak_mem_avg = sum(self._peak_memory_samples) / len(self._peak_memory_samples)
+            peak_mem_avg = sum(self._peak_memory_samples) / len(
+                self._peak_memory_samples
+            )
 
         header = [
             "display_name",
@@ -2134,7 +2420,9 @@ class Distiller(
                 writer.writeheader()
             writer.writerow(row)
 
-    def _maybe_handle_time_limit(self, epoch: int, step: int, rank_is_zero: bool) -> None:
+    def _maybe_handle_time_limit(
+        self, epoch: int, step: int, rank_is_zero: bool
+    ) -> None:
         if self._max_train_seconds is None or self._time_limit_triggered:
             return
         elapsed = time.time() - self._wall_start
@@ -2151,8 +2439,10 @@ class Distiller(
         if self.ddp_enabled and dist.is_initialized():
             dist.barrier()
         self._time_limit_triggered = True
-        limit_hours = self._max_train_seconds / 3600.0 if self._max_train_seconds else 0.0
-        msg = f"Reached max_train_hours after {elapsed/3600.0:.2f}h (limit {limit_hours:.2f}h)."
+        limit_hours = (
+            self._max_train_seconds / 3600.0 if self._max_train_seconds else 0.0
+        )
+        msg = f"Reached max_train_hours after {elapsed / 3600.0:.2f}h (limit {limit_hours:.2f}h)."
         raise TrainingTimeLimitReached(
             msg,
             checkpoint_path=ckpt_path if rank_is_zero else None,
@@ -2169,8 +2459,12 @@ class Distiller(
         minutes = int((elapsed_s % 3600) // 60)
         wall_str = f"{hours}h{minutes:02d}m"
 
-        student_peak_gb = torch.cuda.max_memory_allocated(self.student_device) / (1024 ** 3)
-        student_reserved_gb = torch.cuda.max_memory_reserved(self.student_device) / (1024 ** 3)
+        student_peak_gb = torch.cuda.max_memory_allocated(self.student_device) / (
+            1024**3
+        )
+        student_reserved_gb = torch.cuda.max_memory_reserved(self.student_device) / (
+            1024**3
+        )
         avg_peak_gb: Optional[float] = None
         max_peak_gb: Optional[float] = None
         run_max_gb: Optional[float] = None
@@ -2188,15 +2482,24 @@ class Distiller(
         devices[str(self.student_device)] = {
             "peak_gb": round(student_peak_gb, 2),
             "reserved_gb": round(student_reserved_gb, 2),
-            "max_allocation_gb": round(run_max_gb, 2) if run_max_gb is not None else round(student_peak_gb, 2),
+            "max_allocation_gb": round(run_max_gb, 2)
+            if run_max_gb is not None
+            else round(student_peak_gb, 2),
             "role": "student",
             "gpu_type": torch.cuda.get_device_name(self.student_device),
         }
 
         total_peak = student_peak_gb
-        if teacher_loaded and teacher_dev and teacher_dev.type == "cuda" and teacher_dev != self.student_device:
-            teacher_peak_gb = torch.cuda.max_memory_allocated(teacher_dev) / (1024 ** 3)
-            teacher_reserved_gb = torch.cuda.max_memory_reserved(teacher_dev) / (1024 ** 3)
+        if (
+            teacher_loaded
+            and teacher_dev
+            and teacher_dev.type == "cuda"
+            and teacher_dev != self.student_device
+        ):
+            teacher_peak_gb = torch.cuda.max_memory_allocated(teacher_dev) / (1024**3)
+            teacher_reserved_gb = torch.cuda.max_memory_reserved(teacher_dev) / (
+                1024**3
+            )
             teacher_run_max_gb = teacher_peak_gb
             devices[str(teacher_dev)] = {
                 "peak_gb": round(teacher_peak_gb, 2),
@@ -2209,11 +2512,16 @@ class Distiller(
         elif teacher_loaded and teacher_dev and teacher_dev == self.student_device:
             devices[str(self.student_device)]["role"] = "student+teacher"
 
-        dev_parts = [f"{dev} ({info['role']}): {info['max_allocation_gb']:.2f} GB" for dev, info in devices.items()]
-        print(f"[memory] Peak GPU memory — {', '.join(dev_parts)}, total: {total_peak:.2f} GB")
+        dev_parts = [
+            f"{dev} ({info['role']}): {info['max_allocation_gb']:.2f} GB"
+            for dev, info in devices.items()
+        ]
+        print(
+            f"[memory] Peak GPU memory - {', '.join(dev_parts)}, total: {total_peak:.2f} GB"
+        )
         if avg_peak_gb is not None and max_peak_gb is not None:
             print(
-                "[memory] Student peak (per-step, reset each step) — "
+                "[memory] Student peak (per-step, reset each step) - "
                 f"avg: {avg_peak_gb:.2f} GB, max_step: {max_peak_gb:.2f} GB, "
                 f"max_run: {run_max_gb:.2f} GB, last: {student_peak_gb:.2f} GB, "
                 f"reserved(last): {student_reserved_gb:.2f} GB "
@@ -2243,7 +2551,9 @@ class Distiller(
             "peak_memory_total_gb": round(total_peak, 2),
             "peak_memory_last_gb": round(student_peak_gb, 2),
             "peak_memory_reserved_last_gb": round(student_reserved_gb, 2),
-            "peak_memory_max_allocation_gb": round(run_max_gb, 2) if run_max_gb is not None else round(student_peak_gb, 2),
+            "peak_memory_max_allocation_gb": round(run_max_gb, 2)
+            if run_max_gb is not None
+            else round(student_peak_gb, 2),
             "devices": devices,
         }
         if avg_peak_gb is not None and max_peak_gb is not None:
@@ -2251,16 +2561,25 @@ class Distiller(
             entry["max_peak_memory_gb"] = round(max_peak_gb, 3)
             entry["avg_peak_memory_steps"] = int(peak_steps)
             if self.logger is not None:
-                self.logger.log_scalar("train/avg_peak_memory_gb", float(avg_peak_gb), self.global_step)
+                self.logger.log_scalar(
+                    "train/avg_peak_memory_gb", float(avg_peak_gb), self.global_step
+                )
 
         # Build filename with node name and GPU type for easier filtering
-        node_name = os.getenv("SLURMD_NODENAME", os.getenv("HOSTNAME", "unknown")).strip()
+        node_name = os.getenv(
+            "SLURMD_NODENAME", os.getenv("HOSTNAME", "unknown")
+        ).strip()
         # Sanitize node_name to be filesystem-safe
         node_name = node_name.replace("/", "_").replace("\\", "_").replace(":", "_")
         # Get GPU type from the first device (student)
         gpu_type = torch.cuda.get_device_name(self.student_device)
         # Sanitize GPU type for filename (e.g., "NVIDIA GeForce RTX 3090" -> "NVIDIA_GeForce_RTX_3090")
-        gpu_type_safe = gpu_type.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(":", "_")
+        gpu_type_safe = (
+            gpu_type.replace(" ", "_")
+            .replace("/", "_")
+            .replace("\\", "_")
+            .replace(":", "_")
+        )
         peak_filename = f"peak_memory_{node_name}_{gpu_type_safe}.json"
         peak_path = Path("results") / peak_filename
         peak_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2277,12 +2596,21 @@ class Distiller(
         cache_ready_flag = bool(getattr(self.config, "_cache_is_ready", False))
         force_hash = getattr(self.config, "offline_cache_force_hash", None)
         selected_ids: Optional[List[int]] = None
-        if bool(getattr(self.config, "offline_cache_selected_only", False)) and self.sample_skipper is not None:
+        if (
+            bool(getattr(self.config, "offline_cache_selected_only", False))
+            and self.sample_skipper is not None
+        ):
             selected_raw = self.sample_skipper.selected_sample_ids
             if selected_raw:
                 selected_ids = sorted(int(sid) for sid in selected_raw)
-                setattr(self.config, "_offline_cache_selection_hash", self._hash_selected_ids(selected_ids))
-                setattr(self.config, "_offline_cache_selection_count", len(selected_ids))
+                setattr(
+                    self.config,
+                    "_offline_cache_selection_hash",
+                    self._hash_selected_ids(selected_ids),
+                )
+                setattr(
+                    self.config, "_offline_cache_selection_count", len(selected_ids)
+                )
         if build_cache_on_rank:
             if self.cache is None:
                 self.cache = init_offline_cache_for_trainer(
@@ -2291,9 +2619,13 @@ class Distiller(
                     override_hash=force_hash,
                 )
             if force_hash:
-                missing_tolerance = int(getattr(self.config, "offline_cache_missing_tolerance", 100) or 100)
+                missing_tolerance = int(
+                    getattr(self.config, "offline_cache_missing_tolerance", 100) or 100
+                )
                 expected_items = getattr(self.config, "_expected_dataset_items", None)
-                selection_count = getattr(self.config, "_offline_cache_selection_count", None)
+                selection_count = getattr(
+                    self.config, "_offline_cache_selection_count", None
+                )
                 if selection_count is not None:
                     expected_items = int(selection_count)
                 elif expected_items is None or expected_items < 0:
@@ -2302,7 +2634,9 @@ class Distiller(
                     except Exception:
                         expected_items = None
                 try:
-                    manifest_items = int(len(getattr(self.cache, "manifest", {}).get("items", {})))
+                    manifest_items = int(
+                        len(getattr(self.cache, "manifest", {}).get("items", {}))
+                    )
                 except Exception:
                     manifest_items = 0
                 if expected_items is not None and expected_items >= 0:
@@ -2315,8 +2649,16 @@ class Distiller(
                                 "Rebuild the cache or raise --offline_cache_missing_tolerance/ OFFLINE_CACHE_MISSING_TOLERANCE."
                             )
                         setattr(self.config, "_allow_partial_offline_cache", True)
-                        setattr(self.config, "_offline_cache_missing_items", int(missing_items))
-                        setattr(self.config, "_offline_cache_missing_tolerance", int(missing_tolerance))
+                        setattr(
+                            self.config,
+                            "_offline_cache_missing_items",
+                            int(missing_items),
+                        )
+                        setattr(
+                            self.config,
+                            "_offline_cache_missing_tolerance",
+                            int(missing_tolerance),
+                        )
                         if (not self.ddp_enabled) or (self.ddp_rank == 0):
                             print(
                                 f"[logits-cache] Force-hash cache missing {missing_items}/{expected_items} items; "
@@ -2324,7 +2666,9 @@ class Distiller(
                             )
                 hit_rate = self._probe_cache_hit_rate()
                 if hit_rate is not None:
-                    min_hit = float(getattr(self.config, "offline_cache_min_hit_rate", 0.9) or 0.9)
+                    min_hit = float(
+                        getattr(self.config, "offline_cache_min_hit_rate", 0.9) or 0.9
+                    )
                     if hit_rate < min_hit:
                         raise RuntimeError(
                             f"Force-hash cache appears mismatched: hit_rate={hit_rate:.3f} < {min_hit:.2f}. "
@@ -2337,7 +2681,9 @@ class Distiller(
                     cache_dataset = self.dataloader.dataset
                     if selected_ids:
                         cache_dataset = Subset(cache_dataset, selected_ids)
-                    cache_batch_size = getattr(self.config, "offline_cache_batch_size", None)
+                    cache_batch_size = getattr(
+                        self.config, "offline_cache_batch_size", None
+                    )
                     if cache_batch_size is None or cache_batch_size <= 0:
                         cache_batch_size = self.config.batch_size
                     cache_batch_size = int(cache_batch_size)
@@ -2355,8 +2701,11 @@ class Distiller(
 
                 self.cache = build_offline_cache_if_needed(
                     cache=self.cache,
-                    teacher=self.teacher, tok=self.tok, dataloader=dl_for_cache,
-                    config=self.config, teacher_device=self.teacher_device,
+                    teacher=self.teacher,
+                    tok=self.tok,
+                    dataloader=dl_for_cache,
+                    config=self.config,
+                    teacher_device=self.teacher_device,
                     sanitize_logits_fn=self._sanitize_logits,
                 )
             elif not cache_ready_flag:
@@ -2373,7 +2722,9 @@ class Distiller(
                     override_hash=force_hash,
                 )
                 if not self.teacher_available and not cache_ready_flag:
-                    raise RuntimeError("Offline cache not ready on non-building rank and teacher unavailable.")
+                    raise RuntimeError(
+                        "Offline cache not ready on non-building rank and teacher unavailable."
+                    )
 
     def _reset_bandit_state(self) -> None:
         if self.bandit_manager is not None:
@@ -2386,17 +2737,29 @@ class Distiller(
         if not bool(getattr(self.config, "profiler_enabled", False)):
             return None
         try:
-            from torch.profiler import profile, ProfilerActivity, schedule, tensorboard_trace_handler
+            from torch.profiler import (
+                profile,
+                ProfilerActivity,
+                schedule,
+                tensorboard_trace_handler,
+            )
         except Exception as exc:
-            print(f"[profiler] Unable to import torch.profiler ({exc}); disabling.", flush=True)
+            print(
+                f"[profiler] Unable to import torch.profiler ({exc}); disabling.",
+                flush=True,
+            )
             return None
 
         run_label = os.getenv("RUN_DISPLAY_NAME", "").strip()
         job_name = os.getenv("JOB_NAME", "").strip()
         slurm_job_id = os.getenv("SLURM_JOB_ID", "").strip()
-        tag = job_name or run_label or (f"job_{slurm_job_id}" if slurm_job_id else "run")
+        tag = (
+            job_name or run_label or (f"job_{slurm_job_id}" if slurm_job_id else "run")
+        )
         tag = tag.replace(" ", "_")
-        base_dir = getattr(self.config, "profiler_dir", None) or os.path.join("results", "gpu_util", tag)
+        base_dir = getattr(self.config, "profiler_dir", None) or os.path.join(
+            "results", "gpu_util", tag
+        )
         Path(base_dir).mkdir(parents=True, exist_ok=True)
 
         wait = int(getattr(self.config, "profiler_wait", 1))
@@ -2433,25 +2796,31 @@ class Distiller(
         profiler_path = Path(profiler_dir)
         if not profiler_path.exists():
             return
-        
+
         trace_files = list(profiler_path.glob("*.trace.json"))
         if not trace_files:
             return
-        
+
         try:
             # Import the plotting module
             import sys
+
             tools_dir = Path(__file__).parent.parent.parent / "tools"
             if str(tools_dir) not in sys.path:
                 sys.path.insert(0, str(tools_dir))
-            
+
             from plot_memory_profile import process_trace_file
-            
-            print(f"[profiler] Generating memory profile PNGs from {len(trace_files)} trace(s)...", flush=True)
+
+            print(
+                f"[profiler] Generating memory profile PNGs from {len(trace_files)} trace(s)...",
+                flush=True,
+            )
             for trace_file in trace_files:
                 process_trace_file(trace_file, profiler_path)
         except Exception as e:
-            print(f"[profiler] Warning: Could not generate memory plots: {e}", flush=True)
+            print(
+                f"[profiler] Warning: Could not generate memory plots: {e}", flush=True
+            )
 
     def _probe_cache_hit_rate(self, sample_size: int = 128) -> Optional[float]:
         if self.cache is None:
@@ -2490,7 +2859,9 @@ class Distiller(
 
     def _create_kd_schedule(self, epochs: int) -> KDTemperatureSchedule:
         # Prepare KD temperature annealing schedule (in units of optimizer updates)
-        updates_per_epoch = math.ceil(len(self.dataloader) / max(1, self.config.gradient_accumulation_steps))
+        updates_per_epoch = math.ceil(
+            len(self.dataloader) / max(1, self.config.gradient_accumulation_steps)
+        )
         total_updates = updates_per_epoch * max(1, epochs)
         kd_schedule = KDTemperatureSchedule(self.config, total_updates)
         return kd_schedule
@@ -2515,7 +2886,9 @@ class Distiller(
         start_epoch = max(0, int(getattr(self, "_resume_epoch", 0)))
         if start_epoch >= epochs:
             if rank_is_zero:
-                print(f"[resume] start_epoch={start_epoch} >= epochs={epochs}; skipping training.")
+                print(
+                    f"[resume] start_epoch={start_epoch} >= epochs={epochs}; skipping training."
+                )
             return
 
         profiler = self._maybe_create_profiler(rank_is_zero)
@@ -2550,13 +2923,19 @@ class Distiller(
                         sampler.set_epoch(epoch)
                     else:
                         batch_sampler = getattr(self.dataloader, "batch_sampler", None)
-                        if batch_sampler is not None and hasattr(batch_sampler, "set_epoch"):
+                        if batch_sampler is not None and hasattr(
+                            batch_sampler, "set_epoch"
+                        ):
                             batch_sampler.set_epoch(epoch)
 
                 step = 0  # Manual step counter that only increments on success
-                resume_step = int(getattr(self, "_resume_step", 0)) if epoch == start_epoch else 0
+                resume_step = (
+                    int(getattr(self, "_resume_step", 0)) if epoch == start_epoch else 0
+                )
                 if resume_step > 0 and rank_is_zero:
-                    print(f"[resume] Skipping {resume_step} batches in epoch {epoch + 1} to resume.")
+                    print(
+                        f"[resume] Skipping {resume_step} batches in epoch {epoch + 1} to resume."
+                    )
                 for batch in self.dataloader:
                     if resume_step > 0 and step < resume_step:
                         step += 1
@@ -2576,7 +2955,9 @@ class Distiller(
                             if _log_peak_mem and self.student_device.type == "cuda":
                                 torch.cuda.reset_peak_memory_stats(self.student_device)
 
-                            loss, kl_val, ce_val, bandit_metrics = self._forward_batch(batch)
+                            loss, kl_val, ce_val, bandit_metrics = self._forward_batch(
+                                batch
+                            )
                             # Scale loss by gradient accumulation steps
                             loss = loss / self.config.gradient_accumulation_steps
 
@@ -2591,10 +2972,16 @@ class Distiller(
 
                             # Capture peak memory after backward
                             if _log_peak_mem and self.student_device.type == "cuda":
-                                peak_gb = torch.cuda.max_memory_allocated(self.student_device) / (1024 ** 3)
+                                peak_gb = torch.cuda.max_memory_allocated(
+                                    self.student_device
+                                ) / (1024**3)
                                 self._peak_memory_samples.append(peak_gb)
                                 if self.logger and rank_is_zero:
-                                    self.logger.log_scalar("train/peak_memory_gb", peak_gb, self.global_step)
+                                    self.logger.log_scalar(
+                                        "train/peak_memory_gb",
+                                        peak_gb,
+                                        self.global_step,
+                                    )
 
                             # Reset consecutive OOM counter on success
                             consecutive_oom_failures = 0
@@ -2618,11 +3005,16 @@ class Distiller(
                                 pass
                             try:
                                 import gc
+
                                 gc.collect()
                             except Exception:
                                 pass
 
-                            oom_rate = (total_oom_failures / total_batch_attempts) * 100 if total_batch_attempts > 0 else 0.0
+                            oom_rate = (
+                                (total_oom_failures / total_batch_attempts) * 100
+                                if total_batch_attempts > 0
+                                else 0.0
+                            )
                             if rank_is_zero:
                                 print(
                                     f"[OOM][rank {self.ddp_rank}] CUDA out of memory at epoch {epoch + 1}, step {step + 1}. "
@@ -2642,7 +3034,11 @@ class Distiller(
                                     f"Training aborted after {max_consecutive_ooms} consecutive CUDA OOM failures on one batch."
                                 )
 
-                            if total_batch_attempts >= 20 and oom_rate > max_total_oom_percent and rank_is_zero:
+                            if (
+                                total_batch_attempts >= 20
+                                and oom_rate > max_total_oom_percent
+                                and rank_is_zero
+                            ):
                                 print(
                                     f"[OOM] OOM rate ({oom_rate:.1f}%) exceeds threshold ({max_total_oom_percent}%). "
                                     f"Sleeping {oom_failure_sleep_s}s before exiting..."
@@ -2669,40 +3065,57 @@ class Distiller(
                         if scaler is not None:
                             # fp16: unscale, clip, step, update scaler
                             scaler.unscale_(self.opt)
-                            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
+                            torch.nn.utils.clip_grad_norm_(
+                                self.student.parameters(), 1.0
+                            )
                             scaler.step(self.opt)
                             scaler.update()
                         else:
                             # bfloat16 or no AMP: standard step
-                            torch.nn.utils.clip_grad_norm_(self.student.parameters(), 1.0)
+                            torch.nn.utils.clip_grad_norm_(
+                                self.student.parameters(), 1.0
+                            )
                             self.opt.step()
 
                         self.opt.zero_grad(set_to_none=True)
                         self.global_step += 1
                         # Update KD temperature per schedule if enabled
                         if bool(getattr(self.config, "anneal_kd_temperature", False)):
-                            self.config.kd_temperature = kd_schedule.kd_T_at(self.global_step)
+                            self.config.kd_temperature = kd_schedule.kd_T_at(
+                                self.global_step
+                            )
                             # Log the current KD temperature to visualize the annealing schedule
                             if self.logger and rank_is_zero:
-                                self.logger.log_scalar("train/kd_temperature", float(self.config.kd_temperature), self.global_step)
+                                self.logger.log_scalar(
+                                    "train/kd_temperature",
+                                    float(self.config.kd_temperature),
+                                    self.global_step,
+                                )
                         reward_metrics = None
                         if self.bandit_manager is not None and self.teacher_available:
                             # Consume queued actions collected during forward passes and update the bandit.
-                            reward_metrics = self.bandit_manager.process_rewards(self.student, self.teacher)
+                            reward_metrics = self.bandit_manager.process_rewards(
+                                self.student, self.teacher
+                            )
                         if reward_metrics:
                             last_reward_metrics = reward_metrics
                             if self.logger and rank_is_zero:
                                 self.logger.log(reward_metrics, self.global_step)
 
                         # Save checkpoint if needed
-                        if (self.config.checkpoint_steps > 0 and 
-                            self.global_step % self.config.checkpoint_steps == 0 and rank_is_zero):
+                        if (
+                            self.config.checkpoint_steps > 0
+                            and self.global_step % self.config.checkpoint_steps == 0
+                            and rank_is_zero
+                        ):
                             self.save_checkpoint(epoch, step)
                         # Stop if wall-clock limit reached
                         self._maybe_handle_time_limit(epoch, step, rank_is_zero)
 
                     # logging
-                    running["loss"] += loss.item() * self.config.gradient_accumulation_steps  # Unscale for logging
+                    running["loss"] += (
+                        loss.item() * self.config.gradient_accumulation_steps
+                    )  # Unscale for logging
                     running["kl"] += kl_val
                     running["ce"] += ce_val
                     if bandit_metrics:
@@ -2718,24 +3131,30 @@ class Distiller(
                         ce_loss=ce_val,
                         epoch=epoch + 1,
                         step=step + 1,
-                        global_step=self.global_step
+                        global_step=self.global_step,
                     )
 
                     # Log metrics
                     if self.logger and rank_is_zero:
-                        log_metrics = {**metrics.to_dict(), "train/step": step + 1, "train/global_step": self.global_step}
+                        log_metrics = {
+                            **metrics.to_dict(),
+                            "train/step": step + 1,
+                            "train/global_step": self.global_step,
+                        }
                         if bandit_metrics:
                             log_metrics.update(bandit_metrics)
                         self.logger.log(log_metrics, self.global_step)
 
                     if (step + 1) % log_every == 0:
                         n = log_every
-                        avg_loss = running['loss'] / n
-                        avg_kl = running['kl'] / n
-                        avg_ce = running['ce'] / n
+                        avg_loss = running["loss"] / n
+                        avg_kl = running["kl"] / n
+                        avg_ce = running["ce"] / n
                         avg_bandit: Dict[str, float] = {}
                         if bandit_steps > 0:
-                            avg_bandit = {k: v / bandit_steps for k, v in bandit_running.items()}
+                            avg_bandit = {
+                                k: v / bandit_steps for k, v in bandit_running.items()
+                            }
 
                         elapsed = time.time() - step_start
                         step_start = time.time()
@@ -2743,16 +3162,20 @@ class Distiller(
                         if avg_bandit:
                             sel = avg_bandit.get("bandit/selected_tokens", 0.0)
                             overlap = avg_bandit.get("bandit/overlap_selected", 0.0)
-                            bandit_str = f" | bandit_sel={sel:.2f} overlap={overlap:.2f}"
+                            bandit_str = (
+                                f" | bandit_sel={sel:.2f} overlap={overlap:.2f}"
+                            )
                         reward_str = ""
                         if last_reward_metrics:
-                            avg_reward = last_reward_metrics.get("bandit/avg_reward", 0.0)
+                            avg_reward = last_reward_metrics.get(
+                                "bandit/avg_reward", 0.0
+                            )
                             reward_str = f" | bandit_reward={avg_reward:.4f}"
                         if rank_is_zero:
                             print(
                                 f"ep{epoch + 1} step{step + 1} | "
                                 f"loss={avg_loss:.4f} kl={avg_kl:.4f} ce={avg_ce:.4f} "
-                                f"| global_step={self.global_step}{bandit_str}{reward_str} | {elapsed:.2f}s total, {elapsed/log_every:.2f}s/step"
+                                f"| global_step={self.global_step}{bandit_str}{reward_str} | {elapsed:.2f}s total, {elapsed / log_every:.2f}s/step"
                             )
 
                         # Log averages using new combined logger or legacy loggers
@@ -2761,7 +3184,7 @@ class Distiller(
                             "train/avg_kl_loss": avg_kl,
                             "train/avg_ce_loss": avg_ce,
                             "train/elapsed_time": elapsed,
-                            "train/steps_per_second": log_every / elapsed
+                            "train/steps_per_second": log_every / elapsed,
                         }
                         if avg_bandit:
                             avg_metrics.update(avg_bandit)
@@ -2786,5 +3209,6 @@ class Distiller(
                     pass
                 # Generate memory profile PNGs from traces
                 self._generate_memory_profile_plots()
+
 
 __all__ = ["Distiller"]

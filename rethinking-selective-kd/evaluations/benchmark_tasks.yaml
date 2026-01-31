@@ -7,8 +7,8 @@ manual_tasks:
       max_new_tokens: 256
       do_sample: false
       temperature: 0.0
-    process_docs: !function sampledkd.evaluations.utils.process_docs_svamp
-    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    process_docs: !function sekd.evaluations.utils.process_docs_svamp
+    process_results: !function sekd.evaluations.utils.process_results_numeric_em
     num_fewshot: 0
 
   - task: aime25
@@ -19,8 +19,8 @@ manual_tasks:
       max_new_tokens: 256
       do_sample: false
       temperature: 0.0
-    process_docs: !function sampledkd.evaluations.utils.process_docs_aimo
-    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    process_docs: !function sekd.evaluations.utils.process_docs_aimo
+    process_results: !function sekd.evaluations.utils.process_results_numeric_em
     num_fewshot: 0
 
   - task: aime24
@@ -31,8 +31,8 @@ manual_tasks:
       max_new_tokens: 256
       do_sample: false
       temperature: 0.0
-    process_docs: !function sampledkd.evaluations.utils.process_docs_aimo
-    process_results: !function sampledkd.evaluations.utils.process_results_numeric_em
+    process_docs: !function sekd.evaluations.utils.process_docs_aimo
+    process_results: !function sekd.evaluations.utils.process_results_numeric_em
     num_fewshot: 0
 
   - task: ifeval
@@ -43,5 +43,5 @@ manual_tasks:
       max_new_tokens: 256
       do_sample: false
       temperature: 0.0
-    process_docs: !function sampledkd.evaluations.utils.process_docs_ifeval
+    process_docs: !function sekd.evaluations.utils.process_docs_ifeval
     num_fewshot: 0

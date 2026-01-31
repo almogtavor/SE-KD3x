@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from sampledkd.evaluations.fsdp_patch import maybe_enable_fsdp
+from sekd.evaluations.fsdp_patch import maybe_enable_fsdp
 
 
 def main() -> int:

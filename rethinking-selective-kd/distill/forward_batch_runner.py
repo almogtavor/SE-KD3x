@@ -49,11 +49,17 @@ class ForwardBatchRunner:
         self.extra_metrics: Optional[Dict[str, float]] = None
         self.ce_loss_override: Optional[torch.Tensor] = None
         self.ce_selection_mask: Optional[torch.Tensor] = None
-        self.ce_all_tokens = bool(getattr(distiller.config, "enable_ce_on_all_tokens", False))
+        self.ce_all_tokens = bool(
+            getattr(distiller.config, "enable_ce_on_all_tokens", False)
+        )
 
     def run(self) -> Tuple[torch.Tensor, float, float, Optional[Dict[str, float]]]:
         skipper = getattr(self.distiller, "sample_skipper", None)
-        filtered = skipper.maybe_filter_batch(self.batch) if skipper is not None else self.batch
+        filtered = (
+            skipper.maybe_filter_batch(self.batch)
+            if skipper is not None
+            else self.batch
+        )
         if filtered is None:
             raise SkipBatch("all samples in batch were filtered")
         self.batch = filtered
@@ -78,11 +84,15 @@ class ForwardBatchRunner:
     def _maybe_filter_cache_missing_samples(self) -> None:
         if not bool(getattr(self.distiller.config, "offline_cache", False)):
             return
-        if not bool(getattr(self.distiller.config, "_allow_partial_offline_cache", False)):
+        if not bool(
+            getattr(self.distiller.config, "_allow_partial_offline_cache", False)
+        ):
             return
         if self.distiller.cache is None:
             return
-        input_ids = self.batch.get("input_ids") if isinstance(self.batch, dict) else None
+        input_ids = (
+            self.batch.get("input_ids") if isinstance(self.batch, dict) else None
+        )
         if input_ids is None:
             return
         if not torch.is_tensor(input_ids):
@@ -106,8 +116,16 @@ class ForwardBatchRunner:
 
         if not getattr(self.distiller, "_printed_cache_missing_skip", False):
             if (not self.distiller.ddp_enabled) or (self.distiller.ddp_rank == 0):
-                missing_total = int(getattr(self.distiller.config, "_offline_cache_missing_items", 0) or 0)
-                tolerance = int(getattr(self.distiller.config, "_offline_cache_missing_tolerance", 0) or 0)
+                missing_total = int(
+                    getattr(self.distiller.config, "_offline_cache_missing_items", 0)
+                    or 0
+                )
+                tolerance = int(
+                    getattr(
+                        self.distiller.config, "_offline_cache_missing_tolerance", 0
+                    )
+                    or 0
+                )
                 print(
                     f"[logits-cache] Skipping samples missing from cache "
                     f"({missing_total} <= {tolerance} total missing)."
@@ -117,7 +135,9 @@ class ForwardBatchRunner:
         self.batch = self._filter_batch_by_indices(self.batch, keep, batch_size)
 
     @staticmethod
-    def _filter_batch_by_indices(batch: Dict[str, Any], keep: List[int], batch_size: int) -> Dict[str, Any]:
+    def _filter_batch_by_indices(
+        batch: Dict[str, Any], keep: List[int], batch_size: int
+    ) -> Dict[str, Any]:
         if not keep:
             return batch
         keep_idx = torch.tensor(keep, dtype=torch.long)
@@ -141,26 +161,35 @@ class ForwardBatchRunner:
         )
         if not sel_flags:
             return False
+        # With offline_cache, we use cached entropy for selection and cached RS-KD for teacher logits
+        # so teacher is NOT required for selective lm_head when cache is available
         if bool(getattr(cfg, "offline_cache", False)):
-            raise RuntimeError(
-                "offline_cache=True is incompatible with selective_lm_head flows because they require an online teacher. "
-                "Disable selective LM head or disable offline_cache."
-            )
+            return True
         if not self.distiller.teacher_available:
             return False
         return True
 
-    def _run_selective_lm_head_flow(self) -> Tuple[torch.Tensor, float, float, Optional[Dict[str, float]]]:
-        """Memory-efficient flow with independently controlled teacher/student selective lm_head."""
+    def _run_selective_lm_head_flow(
+        self,
+    ) -> Tuple[torch.Tensor, float, float, Optional[Dict[str, float]]]:
+        """Memory-efficient flow with independently controlled teacher/student selective lm_head.
+
+        When offline_cache=True:
+        - Uses cached teacher entropy for position selection (no online computation needed)
+        - Uses cached RS-KD samples for teacher logits (no teacher forward needed)
+        """
         cfg = self.distiller.config
         sel_teacher = bool(getattr(cfg, "teacher_selective_lm_head", False))
         sel_student = bool(getattr(cfg, "student_selective_lm_head", False))
+        use_offline_cache = bool(getattr(cfg, "offline_cache", False))
 
         t_start = time.perf_counter()
 
         student_base = self.distiller._student_base
         if not hasattr(student_base, "model"):
-            raise RuntimeError("Student model must have .model and .lm_head attributes for selective lm_head.")
+            raise RuntimeError(
+                "Student model must have .model and .lm_head attributes for selective lm_head."
+            )
         student_transformer = student_base.model
         student_lm_head = student_base.lm_head
 
@@ -175,30 +204,36 @@ class ForwardBatchRunner:
             student_hidden_states = student_outputs.last_hidden_state  # [B, T, D]
         t_student_base = time.perf_counter() - t_student_base_start
 
-        # Step 2: Compute student entropy (no grad) and select top-k%
+        # Step 2: Select positions - use cached entropy if offline_cache, else compute student entropy
         t_entropy_start = time.perf_counter()
         k_percent = float(cfg.k_percent)
         normalize_topk = bool(getattr(cfg, "normalize_topk_by_length", False))
-        chunk_size = int(getattr(cfg, "entropy_streaming_chunk_size", 128))
-        selected_mask, _ = compute_student_entropy_and_select(
-            student_hidden_states=student_hidden_states,
-            lm_head=student_lm_head,
-            valid_next=self.valid_next,
-            k_percent=k_percent,
-            normalize_topk_by_length=normalize_topk,
-            chunk_size=chunk_size,
-        )
+
+        if use_offline_cache:
+            # Use cached teacher entropy for selection
+            selected_mask = self._select_positions_from_cache(k_percent, normalize_topk)
+        else:
+            # Compute student entropy online and select top-k%
+            chunk_size = int(getattr(cfg, "entropy_streaming_chunk_size", 128))
+            selected_mask, _ = compute_student_entropy_and_select(
+                student_hidden_states=student_hidden_states,
+                lm_head=student_lm_head,
+                valid_next=self.valid_next,
+                k_percent=k_percent,
+                normalize_topk_by_length=normalize_topk,
+                chunk_size=chunk_size,
+            )
         t_entropy = time.perf_counter() - t_entropy_start
 
         n_selected = int(selected_mask.sum().item())
         if n_selected == 0:
             return student_hidden_states.sum() * 0.0, 0.0, 0.0, None
 
-        # Step 3: Student logits — selective or full
+        # Step 3: Student logits - selective or full
         t_student_logits_start = time.perf_counter()
         alpha_ce = float(cfg.alpha_ce) if cfg.enable_ce else 0.0
         needs_full_hidden_states = alpha_ce > 0.0 and self.ce_all_tokens and sel_student
-        
+
         if sel_student:
             with self.autocast(enabled=self.amp_enabled, dtype=self.amp_dtype):
                 s_logits_for_kd = selective_student_logits(
@@ -211,15 +246,23 @@ class ForwardBatchRunner:
                 del student_hidden_states
         else:
             with self.autocast(enabled=self.amp_enabled, dtype=self.amp_dtype):
-                s_full_logits = student_lm_head(student_hidden_states[:, :-1, :])  # [B, T-1, V]
+                s_full_logits = student_lm_head(
+                    student_hidden_states[:, :-1, :]
+                )  # [B, T-1, V]
             batch_idx, pos_idx = torch.nonzero(selected_mask, as_tuple=True)
             s_logits_for_kd = s_full_logits[batch_idx, pos_idx]  # [N_sel, V]
         t_student_logits = time.perf_counter() - t_student_logits_start
         s_logits_for_kd = self.distiller._sanitize_logits(s_logits_for_kd, "student")
 
-        # Step 4: Teacher logits — selective or full
+        # Step 4: Teacher logits - from cache or online
         t_teacher_logits_start = time.perf_counter()
-        if sel_teacher:
+        t_logits_for_kd = None
+        cached_rs_data = None  # Will hold (ids_U, probs_U) if using cache
+
+        if use_offline_cache:
+            # Get teacher logits from cached RS-KD samples
+            cached_rs_data = self._get_cached_rs_for_selected(selected_mask)
+        elif sel_teacher:
             t_logits_for_kd = selective_teacher_logits(
                 teacher_model=self.distiller.teacher,
                 input_ids=self.input_ids,
@@ -236,37 +279,62 @@ class ForwardBatchRunner:
                     t_full = self.distiller.teacher(
                         self.input_ids.to(t_dev),
                         attention_mask=self.attn_mask.to(t_dev),
-                ).logits[:, :-1, :]  # [B, T-1, V_teacher]
-            batch_idx, pos_idx = torch.nonzero(selected_mask.to(t_full.device), as_tuple=True)
+                    ).logits[:, :-1, :]  # [B, T-1, V_teacher]
+            batch_idx, pos_idx = torch.nonzero(
+                selected_mask.to(t_full.device), as_tuple=True
+            )
             t_logits_for_kd = t_full[batch_idx, pos_idx]  # [N_sel, V_teacher]
         t_teacher_logits = time.perf_counter() - t_teacher_logits_start
-        t_logits_for_kd = self.distiller._sanitize_logits(t_logits_for_kd, "teacher")
-        t_logits_for_kd = t_logits_for_kd.to(self.distiller.student_device)
+
+        if t_logits_for_kd is not None:
+            t_logits_for_kd = self.distiller._sanitize_logits(t_logits_for_kd, "teacher")
+            t_logits_for_kd = t_logits_for_kd.to(self.distiller.student_device)
 
         # Step 5: KD loss on selected positions
-        # Use F.kl_div with log_target=True to avoid materializing intermediate prob tensors
         T, T2 = self.T, self.T2
-        s_log_probs = torch.log_softmax(s_logits_for_kd.float() / T, dim=-1)
-        t_log_probs = torch.log_softmax(t_logits_for_kd.float() / T, dim=-1)
 
-        use_fused_kl = bool(getattr(cfg, "fused_kl_loss", True))
-        if use_fused_kl:
-            # Memory-efficient: F.kl_div avoids creating intermediate probability tensors
-            if getattr(cfg, "kd_objective", "forward") == "reverse":
-                # KL(student || teacher) = sum(student * (log_student - log_teacher))
-                kd_loss = F.kl_div(t_log_probs, s_log_probs, log_target=True, reduction='batchmean') * T2
-            else:
-                # KL(teacher || student) = sum(teacher * (log_teacher - log_student))
-                kd_loss = F.kl_div(s_log_probs, t_log_probs, log_target=True, reduction='batchmean') * T2
-        else:
-            # Original implementation (kept for backward compatibility / debugging)
-            if getattr(cfg, "kd_objective", "forward") == "reverse":
-                s_probs = s_log_probs.exp()
-                kd_per_pos = (s_probs * (s_log_probs - t_log_probs)).sum(dim=-1)
-            else:
-                t_probs = t_log_probs.exp()
-                kd_per_pos = (t_probs * (t_log_probs - s_log_probs)).sum(dim=-1)
+        if cached_rs_data is not None:
+            # Use cached RS-KD samples for KD loss (no teacher logits available)
+            ids_U, probs_U = cached_rs_data
+            s_log_probs = torch.log_softmax(s_logits_for_kd.float() / T, dim=-1)
+            # Gather student log-probs at cached teacher sample indices
+            s_logp_on_U = torch.gather(s_log_probs, 1, ids_U)
+            # KD loss: cross-entropy with teacher's sampled distribution
+            kd_per_pos = -(probs_U * s_logp_on_U).sum(dim=-1)
             kd_loss = kd_per_pos.mean() * T2
+        else:
+            # Use full teacher logits for KD loss
+            s_log_probs = torch.log_softmax(s_logits_for_kd.float() / T, dim=-1)
+            t_log_probs = torch.log_softmax(t_logits_for_kd.float() / T, dim=-1)
+
+            use_fused_kl = bool(getattr(cfg, "fused_kl_loss", True))
+            if use_fused_kl:
+                # Memory-efficient: F.kl_div avoids creating intermediate probability tensors
+                if getattr(cfg, "kd_objective", "forward") == "reverse":
+                    # KL(student || teacher) = sum(student * (log_student - log_teacher))
+                    kd_loss = (
+                        F.kl_div(
+                            t_log_probs, s_log_probs, log_target=True, reduction="batchmean"
+                        )
+                        * T2
+                    )
+                else:
+                    # KL(teacher || student) = sum(teacher * (log_teacher - log_student))
+                    kd_loss = (
+                        F.kl_div(
+                            s_log_probs, t_log_probs, log_target=True, reduction="batchmean"
+                        )
+                        * T2
+                    )
+            else:
+                # Original implementation (kept for backward compatibility / debugging)
+                if getattr(cfg, "kd_objective", "forward") == "reverse":
+                    s_probs = s_log_probs.exp()
+                    kd_per_pos = (s_probs * (s_log_probs - t_log_probs)).sum(dim=-1)
+                else:
+                    t_probs = t_log_probs.exp()
+                    kd_per_pos = (t_probs * (t_log_probs - s_log_probs)).sum(dim=-1)
+                kd_loss = kd_per_pos.mean() * T2
 
         if self.log_debug:
             kd_val = float(kd_loss.detach().item())
@@ -286,10 +354,15 @@ class ForwardBatchRunner:
                 ce_logits = self.distiller._sanitize_logits(ce_logits, "student")
                 targets = self.input_ids_s[:, 1:]
                 V = ce_logits.size(-1)
-                targets = targets.clamp(min=-1, max=V - 1).masked_fill(~self.ce_mask, -100)
+                targets = targets.clamp(min=-1, max=V - 1).masked_fill(
+                    ~self.ce_mask, -100
+                )
                 ce_loss = F.nll_loss(
                     torch.log_softmax(ce_logits.float(), dim=-1).reshape(-1, V),
-                    targets.reshape(-1).long(), ignore_index=-100, reduction="mean")
+                    targets.reshape(-1).long(),
+                    ignore_index=-100,
+                    reduction="mean",
+                )
             else:
                 batch_idx, pos_idx = torch.nonzero(selected_mask, as_tuple=True)
                 targets_sel = self.input_ids_s[:, 1:][batch_idx, pos_idx]
@@ -297,9 +370,15 @@ class ForwardBatchRunner:
                 targets_sel = targets_sel.clamp(min=0, max=V - 1)
                 ce_loss = F.nll_loss(
                     torch.log_softmax(s_logits_for_kd.float(), dim=-1),
-                    targets_sel.long(), reduction="mean")
+                    targets_sel.long(),
+                    reduction="mean",
+                )
             use_unbounded = bool(getattr(cfg, "unbounded_to_1_loss", False))
-            total = (kd_loss + ce_loss) if use_unbounded else ((1.0 - alpha_ce) * kd_loss + alpha_ce * ce_loss)
+            total = (
+                (kd_loss + ce_loss)
+                if use_unbounded
+                else ((1.0 - alpha_ce) * kd_loss + alpha_ce * ce_loss)
+            )
             ce_val = float(ce_loss.item())
         else:
             total = kd_loss
@@ -325,12 +404,205 @@ class ForwardBatchRunner:
             )
         return total, float(kd_loss.item()), ce_val, None
 
+    def _select_positions_from_cache(
+        self, k_percent: float, normalize_topk: bool
+    ) -> torch.Tensor:
+        """Select positions using cached teacher entropy instead of computing student entropy.
+
+        This enables selective_lm_head to work with offline_cache=True by using
+        the pre-computed teacher entropy stored in the cache.
+
+        Args:
+            k_percent: Percentage of positions to select (0-100).
+            normalize_topk: Whether to use batch-normalized quota.
+
+        Returns:
+            selected_mask: [B, T-1] boolean mask of selected positions.
+        """
+        cached_items = self.distiller._lookup_cache_batch(self.input_ids)
+        if cached_items is None:
+            raise RuntimeError(
+                "offline_cache=True but cached items are missing. Rebuild the cache."
+            )
+
+        B = self.valid_next.size(0)
+        L_minus_1 = self.valid_next.size(1)
+        pct = max(0.0, min(1.0, k_percent / 100.0))
+
+        # Extract cached entropy
+        selection_scores = torch.zeros(
+            (B, L_minus_1), device=self.distiller.student_device, dtype=torch.float32
+        )
+        cache_mode = self.distiller._cache_mode() or "entropy"
+
+        for b in range(B):
+            if b >= len(cached_items) or cached_items[b] is None:
+                continue
+            item = cached_items[b]
+
+            if cache_mode == "unc":
+                # Use cached target probabilities; uncertainty = 1 - p(target)
+                if "target_prob_fp16" in item:
+                    target_probs = torch.as_tensor(
+                        item["target_prob_fp16"], dtype=torch.float16
+                    ).to(self.distiller.student_device).float()
+                    unc = 1.0 - target_probs
+                    end_idx = min(len(unc), L_minus_1)
+                    selection_scores[b, :end_idx] = unc[:end_idx]
+            else:
+                # Use cached entropy
+                if "H_hat_u8" in item:
+                    H_u8 = torch.as_tensor(
+                        item["H_hat_u8"], dtype=torch.uint8
+                    ).to(self.distiller.student_device)
+                    # Decode from uint8: stored as (H / H_cap) * 255
+                    V = getattr(self.distiller, "_vocab_size", 152064)
+                    H_cap = max(1e-6, math.log(max(2, V)))
+                    H = (H_u8.float() / 255.0) * H_cap
+                    end_idx = min(len(H), L_minus_1)
+                    selection_scores[b, :end_idx] = H[:end_idx]
+                elif "entropy_fp16" in item:
+                    H = torch.as_tensor(
+                        item["entropy_fp16"], dtype=torch.float16
+                    ).to(self.distiller.student_device).float()
+                    end_idx = min(len(H), L_minus_1)
+                    selection_scores[b, :end_idx] = H[:end_idx]
+
+        # Select top-k% positions by score
+        selected_mask = torch.zeros_like(self.valid_next, dtype=torch.bool)
+
+        shared_quota = None
+        if normalize_topk:
+            total_valid = int(self.valid_next.sum().item())
+            avg_valid = total_valid / max(1, B)
+            shared_quota = max(1, math.ceil(pct * avg_valid))
+
+        for b in range(B):
+            mask_b = self.valid_next[b]
+            n_valid = int(mask_b.sum().item())
+            if n_valid < 1:
+                continue
+
+            if shared_quota is not None:
+                k = min(n_valid, shared_quota)
+            else:
+                k = max(1, min(n_valid, math.ceil(pct * n_valid)))
+
+            valid_idx = torch.where(mask_b)[0]
+            scores = selection_scores[b][mask_b].float()
+
+            if scores.numel() == 0:
+                continue
+
+            _, rel = torch.topk(scores, k=k, largest=True, sorted=False)
+            sel_abs = valid_idx[rel]
+            selected_mask[b, sel_abs] = True
+
+        # Store for use by _get_cached_rs_for_selected
+        self._cached_items_for_selective = cached_items
+        return selected_mask
+
+    def _get_cached_rs_for_selected(
+        self, selected_mask: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Get cached RS-KD samples for selected positions.
+
+        Args:
+            selected_mask: [B, T-1] boolean mask of selected positions.
+
+        Returns:
+            ids_U: [N_sel, U] token IDs from cached RS-KD samples.
+            probs_U: [N_sel, U] normalized probabilities.
+        """
+        cached_items = getattr(self, "_cached_items_for_selective", None)
+        if cached_items is None:
+            cached_items = self.distiller._lookup_cache_batch(self.input_ids)
+        if cached_items is None:
+            raise RuntimeError(
+                "offline_cache=True but cached items are missing for RS-KD."
+            )
+
+        batch_idx, pos_idx = torch.nonzero(selected_mask, as_tuple=True)
+        N_sel = batch_idx.numel()
+
+        if N_sel == 0:
+            return torch.zeros((0, 64), dtype=torch.long, device=self.distiller.student_device), \
+                   torch.zeros((0, 64), dtype=torch.float32, device=self.distiller.student_device)
+
+        B = selected_mask.size(0)
+        U_max = 64  # Default max unique samples per position
+
+        # Get U from first valid cache item
+        for b in range(B):
+            if cached_items[b] is not None and "rs" in cached_items[b]:
+                U_max = int(cached_items[b]["rs"].get("U", 64))
+                break
+
+        ids_U = torch.zeros(
+            (N_sel, U_max), dtype=torch.long, device=self.distiller.student_device
+        )
+        probs_U = torch.zeros(
+            (N_sel, U_max), dtype=torch.float32, device=self.distiller.student_device
+        )
+
+        for r in range(N_sel):
+            b = int(batch_idx[r].item())
+            p = int(pos_idx[r].item())
+
+            if cached_items[b] is None or "rs" not in cached_items[b]:
+                continue
+
+            rs = cached_items[b]["rs"]
+            U = int(rs.get("U", U_max))
+            sentinel_id = int(rs.get("sentinel_id", 0))
+            packed = rs.get("packed")
+
+            if packed is None:
+                continue
+
+            packed_tensor = torch.as_tensor(
+                packed, device=self.distiller.student_device, dtype=torch.uint8
+            )
+
+            # Extract block for this position
+            block = packed_tensor[p * U * 3 : (p + 1) * U * 3]
+            if block.numel() < U * 3:
+                continue
+
+            # Unpack: 3 bytes -> (17-bit ID, 7-bit prob)
+            block_3 = block.view(U, 3).to(torch.int64)
+            x = block_3[:, 0] | (block_3[:, 1] << 8) | (block_3[:, 2] << 16)
+            ids17 = x & ((1 << 17) - 1)
+            q7 = (x >> 17) & ((1 << 7) - 1)
+
+            # Filter sentinels and zero probs
+            keep = (ids17 != sentinel_id) & (q7 > 0)
+            n_keep = int(keep.sum().item())
+
+            if n_keep == 0:
+                continue
+
+            ids_keep = ids17[keep]
+            probs_keep = (q7[keep].float() / 127.0).clamp_min(0.0)
+
+            # Normalize
+            prob_sum = probs_keep.sum()
+            if prob_sum > 0:
+                probs_keep = probs_keep / prob_sum
+
+            ids_U[r, :n_keep] = ids_keep
+            probs_U[r, :n_keep] = probs_keep
+
+        return ids_U, probs_U
+
     def _init_debug(self) -> None:
         debug_interval = getattr(self.distiller, "_debug_log_interval", 0)
         self.distiller._debug_forward_calls += 1
         self.log_debug = False
         if debug_interval > 0:
-            if self.distiller._debug_forward_calls == 1 or (self.distiller._debug_forward_calls % debug_interval == 0):
+            if self.distiller._debug_forward_calls == 1 or (
+                self.distiller._debug_forward_calls % debug_interval == 0
+            ):
                 self.log_debug = True
 
     def _move_inputs(self) -> None:
@@ -360,18 +632,26 @@ class ForwardBatchRunner:
         self.autocast = autocast
         self.amp_enabled = getattr(self.distiller, "_use_amp", False)
         self.amp_dtype = getattr(self.distiller, "_amp_dtype", torch.float32)
-        self.rank_is_zero = (not self.distiller.ddp_enabled) or (self.distiller.ddp_rank == 0)
+        self.rank_is_zero = (not self.distiller.ddp_enabled) or (
+            self.distiller.ddp_rank == 0
+        )
 
     def _student_forward(self) -> None:
         with self.autocast(enabled=self.amp_enabled, dtype=self.amp_dtype):
-            s_logits = self.distiller.student(self.input_ids_s, attention_mask=self.attn_mask_s).logits
+            s_logits = self.distiller.student(
+                self.input_ids_s, attention_mask=self.attn_mask_s
+            ).logits
         self.s_logits = self.distiller._sanitize_logits(s_logits, "student")
         self.s_pred = self.s_logits[:, :-1, :]
         self.s_log_probs: Optional[torch.Tensor] = None
 
     def _setup_cache_state(self) -> None:
         offline_cache = bool(getattr(self.distiller.config, "offline_cache", False))
-        self.cached_items = self.distiller._lookup_cache_batch(self.input_ids) if offline_cache else None
+        self.cached_items = (
+            self.distiller._lookup_cache_batch(self.input_ids)
+            if offline_cache
+            else None
+        )
         self.cache_mode = self.distiller._cache_mode() or "entropy"
         self.cached_target_probs: Optional[torch.Tensor] = None
         self.ids_U: Optional[torch.Tensor] = None
@@ -388,7 +668,9 @@ class ForwardBatchRunner:
                 )
 
         self.distill_type = getattr(self.distiller.config, "distill_type", "vanilla")
-        self.score_enabled_flag = bool(getattr(self.distiller.config, "score_token_selection", False))
+        self.score_enabled_flag = bool(
+            getattr(self.distiller.config, "score_token_selection", False)
+        )
         cache_only_supported = {
             "vanilla",
             "top-k-tok",
@@ -404,8 +686,15 @@ class ForwardBatchRunner:
         if self.cache_mode == "unc":
             cache_only_supported.add("atkd")
         self.use_vocab_rs_kd = bool(offline_cache)
-        if self.distill_type in {"dkd", "top-k-tok-dkd", "random-dkd", "pos-rs-kd-dkd"} and not (self.distiller.teacher_available or self.use_vocab_rs_kd):
-            raise RuntimeError(f"distill_type='{self.distill_type}' requires teacher logits from cache or an online teacher.")
+        if self.distill_type in {
+            "dkd",
+            "top-k-tok-dkd",
+            "random-dkd",
+            "pos-rs-kd-dkd",
+        } and not (self.distiller.teacher_available or self.use_vocab_rs_kd):
+            raise RuntimeError(
+                f"distill_type='{self.distill_type}' requires teacher logits from cache or an online teacher."
+            )
         if not self.distiller.teacher_available:
             if self.distill_type == "atkd" and self.cache_mode != "unc":
                 raise RuntimeError(
@@ -422,7 +711,9 @@ class ForwardBatchRunner:
             and self.distiller.teacher_available
             and not getattr(self.distiller, "_cache_build_on_miss_done", False)
         ):
-            build_cache_on_rank = (not self.distiller.ddp_enabled) or (self.distiller.ddp_rank == 0)
+            build_cache_on_rank = (not self.distiller.ddp_enabled) or (
+                self.distiller.ddp_rank == 0
+            )
             self.distiller._prepare_offline_cache(build_cache_on_rank)
             self.distiller._cache_build_on_miss_done = True
             self.cached_items = self.distiller._lookup_cache_batch(self.input_ids)
@@ -452,9 +743,15 @@ class ForwardBatchRunner:
         self.t_log_probs = None
         offline_cache = bool(getattr(self.distiller.config, "offline_cache", False))
 
-        if self.supports_cached_teacher_logits and not self.distiller._printed_cache_info:
+        if (
+            self.supports_cached_teacher_logits
+            and not self.distiller._printed_cache_info
+        ):
             if self.rank_is_zero:
-                print("[logits-cache] Using offline cache (vanilla KD on all positions) → computing KD from cache.", flush=True)
+                print(
+                    "[logits-cache] Using offline cache (vanilla KD on all positions) → computing KD from cache.",
+                    flush=True,
+                )
             self.distiller._printed_cache_info = True
 
         if not self.supports_cached_teacher_logits:
@@ -482,7 +779,9 @@ class ForwardBatchRunner:
         else:
             if not self.distiller._printed_cache_info:
                 if self.rank_is_zero:
-                    print("[logits-cache] Using offline cache → skipping online teacher forward.")
+                    print(
+                        "[logits-cache] Using offline cache → skipping online teacher forward."
+                    )
                 self.distiller._printed_cache_info = True
 
     def _compute_kd_loss(self) -> None:
@@ -519,7 +818,9 @@ class ForwardBatchRunner:
                 self.distiller.logger.log(atkd_metrics, self.distiller.global_step)
         else:
             if self.s_log_probs is None:
-                self.s_log_probs = torch.log_softmax((self.s_pred.float() / self.T), dim=-1)
+                self.s_log_probs = torch.log_softmax(
+                    (self.s_pred.float() / self.T), dim=-1
+                )
             self.kd_loss, kd_extra = self.distiller._compute_kd_loss(
                 self.t_pred,
                 self.t_log_probs,
@@ -533,7 +834,9 @@ class ForwardBatchRunner:
             )
             if kd_extra:
                 self.extra_metrics = kd_extra
-            self.ce_selection_mask = getattr(self.distiller, "_last_ce_selection_mask", None)
+            self.ce_selection_mask = getattr(
+                self.distiller, "_last_ce_selection_mask", None
+            )
 
     def _kd_loss_with_cache(self) -> None:
         (
@@ -563,7 +866,14 @@ class ForwardBatchRunner:
         distill_type = self.distill_type
         score_enabled_flag = self.score_enabled_flag
         T = self.T
-        return cached_items, cache_mode, supports_cached_teacher_logits, distill_type, score_enabled_flag, T
+        return (
+            cached_items,
+            cache_mode,
+            supports_cached_teacher_logits,
+            distill_type,
+            score_enabled_flag,
+            T,
+        )
 
     def _handle_cached_kd_loss(
         self,
@@ -590,7 +900,13 @@ class ForwardBatchRunner:
         packed_by_b, U_by_b, sen_by_b = [], [], []
         for b in range(B):
             rs = cached_items[b]["rs"]
-            packed_by_b.append(torch.as_tensor(rs["packed"], device=self.distiller.student_device, dtype=torch.uint8))
+            packed_by_b.append(
+                torch.as_tensor(
+                    rs["packed"],
+                    device=self.distiller.student_device,
+                    dtype=torch.uint8,
+                )
+            )
             U_by_b.append(int(rs["U"]))
             sen_by_b.append(int(rs["sentinel_id"]))
 
@@ -599,23 +915,37 @@ class ForwardBatchRunner:
             for b in range(B):
                 entry = cached_items[b].get("target_prob_fp16")
                 if entry is None:
-                    raise RuntimeError("Cache item missing target_prob_fp16 in UNC mode.")
+                    raise RuntimeError(
+                        "Cache item missing target_prob_fp16 in UNC mode."
+                    )
                 target_prob_tensors.append(
-                    torch.as_tensor(entry, dtype=torch.float16).to(self.distiller.student_device).float()
+                    torch.as_tensor(entry, dtype=torch.float16)
+                    .to(self.distiller.student_device)
+                    .float()
                 )
             if target_prob_tensors:
                 self.cached_target_probs = torch.stack(target_prob_tensors, dim=0)
 
         U_max = max(U_by_b) if len(U_by_b) > 0 else 0
-        ids_U = torch.zeros((P_total, U_max), dtype=torch.long, device=self.distiller.student_device)
-        probs_U = torch.zeros((P_total, U_max), dtype=torch.float32, device=self.distiller.student_device)
+        ids_U = torch.zeros(
+            (P_total, U_max), dtype=torch.long, device=self.distiller.student_device
+        )
+        probs_U = torch.zeros(
+            (P_total, U_max), dtype=torch.float32, device=self.distiller.student_device
+        )
 
         # Vectorized unpacking: gather all blocks into a single tensor for batch processing
         if U_max > 0:
             # Preallocate buffer for all packed blocks [P_total, U_max, 3]
-            all_blocks = torch.zeros((P_total, U_max, 3), dtype=torch.uint8, device=self.distiller.student_device)
-            sentinel_ids = torch.zeros(P_total, dtype=torch.int32, device=self.distiller.student_device)
-            
+            all_blocks = torch.zeros(
+                (P_total, U_max, 3),
+                dtype=torch.uint8,
+                device=self.distiller.student_device,
+            )
+            sentinel_ids = torch.zeros(
+                P_total, dtype=torch.int32, device=self.distiller.student_device
+            )
+
             for r in range(P_total):
                 b = int(batch_idx[r].item())
                 p = int(pos_idx[r].item())
@@ -624,30 +954,32 @@ class ForwardBatchRunner:
                 if U == 0:
                     continue
                 packed = packed_by_b[b]
-                block = packed[p * U * 3:(p + 1) * U * 3]
+                block = packed[p * U * 3 : (p + 1) * U * 3]
                 all_blocks[r, :U, :] = block.view(U, 3)
-            
+
             # Vectorized unpack: [P_total, U_max, 3] -> [P_total, U_max] ids and q7
             b_flat = all_blocks.to(torch.int64)  # [P_total, U_max, 3]
-            x = b_flat[:, :, 0] | (b_flat[:, :, 1] << 8) | (b_flat[:, :, 2] << 16)  # [P_total, U_max]
+            x = (
+                b_flat[:, :, 0] | (b_flat[:, :, 1] << 8) | (b_flat[:, :, 2] << 16)
+            )  # [P_total, U_max]
             ids17 = x & ((1 << 17) - 1)  # 17-bit IDs
             q7 = (x >> 17) & ((1 << 7) - 1)  # 7-bit probs
-            
+
             # Filter sentinels and zero probabilities
             sentinel_mask = ids17 != sentinel_ids.unsqueeze(1)  # [P_total, U_max]
             q7_mask = q7 > 0
             keep = sentinel_mask & q7_mask
-            
+
             # Convert to final format
             ids_U_cpu = ids17.to(torch.int64)
             ids_U_cpu[~keep] = 0  # Zero out invalid entries
             probs_U_cpu = (q7.float() / 127.0).clamp_min(0.0)
             probs_U_cpu[~keep] = 0.0
-            
+
             # Normalize probabilities per row
             row_sums = probs_U_cpu.sum(dim=1, keepdim=True).clamp_min(1e-12)
             probs_U_cpu = probs_U_cpu / row_sums
-            
+
             # Already on student_device, no transfer needed
             ids_U = ids_U_cpu
             probs_U = probs_U_cpu
@@ -678,13 +1010,21 @@ class ForwardBatchRunner:
 
         # For other distill types, compute KD loss with sampled teacher vocab
         # CE will be computed normally over full student vocabulary
-        kd_pos_proxy = torch.zeros((self.valid_next.size(0), self.valid_next.size(1)), device=self.distiller.student_device, dtype=torch.float32)
+        kd_pos_proxy = torch.zeros(
+            (self.valid_next.size(0), self.valid_next.size(1)),
+            device=self.distiller.student_device,
+            dtype=torch.float32,
+        )
         if self.s_log_probs is None:
             self.s_log_probs = torch.log_softmax((self.s_pred.float() / self.T), dim=-1)
         student_targets = self.input_ids_s[:, 1:]
-        student_logp_targets = torch.gather(self.s_log_probs, -1, student_targets.unsqueeze(-1)).squeeze(-1)
-        student_ce_full = (-student_logp_targets).detach().masked_fill(~self.valid_next, 0.0)
-        
+        student_logp_targets = torch.gather(
+            self.s_log_probs, -1, student_targets.unsqueeze(-1)
+        ).squeeze(-1)
+        student_ce_full = (
+            (-student_logp_targets).detach().masked_fill(~self.valid_next, 0.0)
+        )
+
         s_rows_logp = self.s_log_probs[batch_idx, pos_idx]
         s_logp_on_U_exact = torch.gather(s_rows_logp, 1, ids_U)
         kd_rows_exact = -(probs_U * s_logp_on_U_exact).sum(dim=1)
@@ -749,7 +1089,7 @@ class ForwardBatchRunner:
     ) -> bool:
         """
         Compute vanilla KD loss (all positions) using sampled teacher vocabulary from cache.
-        
+
         This is the simplest cached KD: no token selection, just distill on all valid positions.
         Teacher probs come from cached sampled vocabulary (RS-KD).
         Student computes full softmax, but we only gather at sampled teacher indices.
@@ -773,9 +1113,16 @@ class ForwardBatchRunner:
         self.kd_loss = kd_loss_value.to(self.distiller.student_dtype)
         return True
 
-    def _cached_dkd_loss_from_keepmask(self, keep_mask: torch.Tensor, weight_mask: Optional[torch.Tensor] = None) -> None:
+    def _cached_dkd_loss_from_keepmask(
+        self, keep_mask: torch.Tensor, weight_mask: Optional[torch.Tensor] = None
+    ) -> None:
         """Compute DKD loss using cached teacher distributions (ids_U/probs_U)."""
-        if self.ids_U is None or self.probs_U is None or self.rs_batch_idx is None or self.rs_pos_idx is None:
+        if (
+            self.ids_U is None
+            or self.probs_U is None
+            or self.rs_batch_idx is None
+            or self.rs_pos_idx is None
+        ):
             raise RuntimeError("DKD cached computation requires cached ids/probs.")
 
         if self.s_log_probs is None:
@@ -869,14 +1216,22 @@ class ForwardBatchRunner:
     ) -> None:
         if self.distiller.bandit_manager is None:
             raise RuntimeError("LinUCB bandit is not initialized.")
-        ent_for_bandit = self.distiller._entropy_for_selection(self.input_ids, t_pred=None)
+        ent_for_bandit = self.distiller._entropy_for_selection(
+            self.input_ids, t_pred=None
+        )
         if self.s_log_probs is None:
             self.s_log_probs = torch.log_softmax((self.s_pred.float() / self.T), dim=-1)
-        student_entropy = (-(self.s_log_probs.exp() * self.s_log_probs).sum(-1)).detach()
+        student_entropy = (
+            -(self.s_log_probs.exp() * self.s_log_probs).sum(-1)
+        ).detach()
         teacher_ce = None
         if self.t_log_probs is not None:
-            targets_t = self.input_ids[:, 1:].to(self.t_log_probs.device, non_blocking=True)
-            teacher_logp = self.t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(-1)
+            targets_t = self.input_ids[:, 1:].to(
+                self.t_log_probs.device, non_blocking=True
+            )
+            teacher_logp = self.t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(
+                -1
+            )
             teacher_ce = (-teacher_logp).to(self.distiller.student_device).detach()
         student_ce = ce_pos_proxy.detach()
         kd_terms, metrics, selection = self.distiller.bandit_manager.select_tokens(
@@ -890,7 +1245,9 @@ class ForwardBatchRunner:
             valid_next=self.valid_next,
             temperature=T,
         )
-        use_dkd = getattr(self.distiller.config, "distill_type", "linucb") == "linucb-dkd"
+        use_dkd = (
+            getattr(self.distiller.config, "distill_type", "linucb") == "linucb-dkd"
+        )
 
         if use_dkd:
             if selection is None or selection[0].numel() == 0:
@@ -908,7 +1265,9 @@ class ForwardBatchRunner:
                     self.kd_loss = self.s_pred.sum() * 0.0
                     self.ce_loss_override = None
         else:
-            kd_loss = torch.cat(kd_terms).mean() if kd_terms else self.s_pred.sum() * 0.0
+            kd_loss = (
+                torch.cat(kd_terms).mean() if kd_terms else self.s_pred.sum() * 0.0
+            )
             self.kd_loss = kd_loss
             self.ce_loss_override = None
         self.extra_metrics = metrics or None
@@ -921,9 +1280,13 @@ class ForwardBatchRunner:
         """Restrict candidate tensors to the requested percentile band."""
         return self.distiller._apply_rs_bucket_filter(vec, idx, bounds)
 
-    def _rs_selection_fraction(self, bucket_bounds: Optional[Tuple[float, float]]) -> float:
+    def _rs_selection_fraction(
+        self, bucket_bounds: Optional[Tuple[float, float]]
+    ) -> float:
         """Return selection fraction (0-1) for RS-KD token sampling."""
-        pct = max(0.0, min(1.0, float(getattr(self.distiller.config, "k_percent", 0)) / 100.0))
+        pct = max(
+            0.0, min(1.0, float(getattr(self.distiller.config, "k_percent", 0)) / 100.0)
+        )
         if bucket_bounds is None:
             return pct
         lower_q, upper_q = bucket_bounds
@@ -955,14 +1318,18 @@ class ForwardBatchRunner:
         use_score = bool(getattr(self.distiller.config, "score_token_selection", False))
         bucket_bounds = self._rs_bucket_bounds()
         pct = self._rs_selection_fraction(bucket_bounds)
-        normalize_topk = bool(getattr(self.distiller.config, "normalize_topk_by_length", False))
+        normalize_topk = bool(
+            getattr(self.distiller.config, "normalize_topk_by_length", False)
+        )
         shared_quota = None
         if normalize_topk:
             total_valid = int(self.valid_next.sum().item())
             avg_valid = total_valid / max(1, self.valid_next.size(0))
             shared_quota = max(1, math.ceil(pct * avg_valid))
         if use_score:
-            ent_for_score = self.distiller._entropy_for_selection(self.input_ids, t_pred=None).to(self.distiller.student_device)
+            ent_for_score = self.distiller._entropy_for_selection(
+                self.input_ids, t_pred=None
+            ).to(self.distiller.student_device)
             score_ctx = self.distiller._prepare_score_context(
                 ent_raw=ent_for_score,
                 kl_pos=kd_pos_proxy,
@@ -987,13 +1354,17 @@ class ForwardBatchRunner:
                 vec = combined[mask_i].float()
             else:
                 if ent_for_rs is None:
-                    ent_for_rs = self.distiller._entropy_for_selection(self.input_ids, t_pred=None)
+                    ent_for_rs = self.distiller._entropy_for_selection(
+                        self.input_ids, t_pred=None
+                    )
                 ent_i = ent_for_rs[i]
                 vec = ent_i[mask_i].float()
             valid_idx_i = torch.where(mask_i)[0]
             filtered = False
             if bucket_bounds is not None:
-                filtered_vec, filtered_idx, filtered = self._apply_rs_bucket_filter(vec, valid_idx_i, bucket_bounds)
+                filtered_vec, filtered_idx, filtered = self._apply_rs_bucket_filter(
+                    vec, valid_idx_i, bucket_bounds
+                )
                 if filtered:
                     vec = filtered_vec
                     valid_idx_i = filtered_idx
@@ -1039,9 +1410,9 @@ class ForwardBatchRunner:
             q_sel = q[rel_sel]
             w = 1.0 / torch.clamp(q_sel, min=q_floor)
             weight_mask[i, abs_sel] += w
-        kd_loss = (
-            kd_pos_proxy * weight_mask
-        ).sum() / weight_mask.sum().clamp_min(1e-12)
+        kd_loss = (kd_pos_proxy * weight_mask).sum() / weight_mask.sum().clamp_min(
+            1e-12
+        )
         self.kd_loss = kd_loss
         self.ce_loss_override = None
 
@@ -1083,7 +1454,9 @@ class ForwardBatchRunner:
             return
         if distill_type == "pos-rs-kd-dkd":
             weight_mask = self._compute_cached_weight_mask_pos_rs()
-            self._cached_dkd_loss_from_keepmask(weight_mask > 0, weight_mask=weight_mask)
+            self._cached_dkd_loss_from_keepmask(
+                weight_mask > 0, weight_mask=weight_mask
+            )
             return
 
         handlers = {
@@ -1096,7 +1469,9 @@ class ForwardBatchRunner:
             handler(score_enabled, kd_pos_proxy, ce_pos_proxy)
             return
 
-        self._handle_cached_distill_default(distill_type, score_enabled, kd_pos_proxy, ce_pos_proxy)
+        self._handle_cached_distill_default(
+            distill_type, score_enabled, kd_pos_proxy, ce_pos_proxy
+        )
 
     def _handle_cached_distill_top_k_tok(
         self,
@@ -1185,7 +1560,9 @@ class ForwardBatchRunner:
         keep_mask = self.valid_next.clone()
         if distill_type not in {"top-k-tok", "bucket", "random", "top-k-tok-dkd"}:
             return keep_mask
-        score_ctx = self._maybe_build_score_context(score_enabled, kd_pos_proxy, ce_pos_proxy)
+        score_ctx = self._maybe_build_score_context(
+            score_enabled, kd_pos_proxy, ce_pos_proxy
+        )
         handlers = {
             "top-k-tok": self._compute_keep_mask_top_k_tok,
             "top-k-tok-dkd": self._compute_keep_mask_top_k_tok,
@@ -1197,7 +1574,9 @@ class ForwardBatchRunner:
     def _maybe_build_score_context(self, score_enabled, kd_pos_proxy, ce_pos_proxy):
         if not score_enabled:
             return None
-        ent_for_score = self.distiller._entropy_for_selection(self.input_ids, t_pred=None).to(self.distiller.student_device)
+        ent_for_score = self.distiller._entropy_for_selection(
+            self.input_ids, t_pred=None
+        ).to(self.distiller.student_device)
         return self.distiller._prepare_score_context(
             ent_raw=ent_for_score,
             kl_pos=kd_pos_proxy,
@@ -1216,7 +1595,9 @@ class ForwardBatchRunner:
         q_floor = float(getattr(self.distiller.config, "rs_floor", 1e-6))
         pct = max(0.0, min(1.0, self.distiller.config.k_percent / 100.0))
         bucket_bounds = self._rs_bucket_bounds()
-        normalize_topk = bool(getattr(self.distiller.config, "normalize_topk_by_length", False))
+        normalize_topk = bool(
+            getattr(self.distiller.config, "normalize_topk_by_length", False)
+        )
         shared_quota = None
         if normalize_topk:
             total_valid = int(self.valid_next.sum().item())
@@ -1230,7 +1611,9 @@ class ForwardBatchRunner:
             vec = ent_raw[i][valid_next_i].float()
             valid_idx = torch.where(valid_next_i)[0]
             if bucket_bounds is not None:
-                vec, valid_idx, _ = self._apply_rs_bucket_filter(vec, valid_idx, bucket_bounds)
+                vec, valid_idx, _ = self._apply_rs_bucket_filter(
+                    vec, valid_idx, bucket_bounds
+                )
             valid_count = int(valid_idx.numel())
             if valid_count < 1:
                 continue
@@ -1258,7 +1641,9 @@ class ForwardBatchRunner:
         return weight_mask
 
     def _compute_keep_mask_top_k_tok(self, score_ctx, score_enabled):
-        ent_cached = self.distiller._entropy_for_selection(self.input_ids, t_pred=None).to(self.distiller.student_device)
+        ent_cached = self.distiller._entropy_for_selection(
+            self.input_ids, t_pred=None
+        ).to(self.distiller.student_device)
         if score_enabled and score_ctx is not None:
             stat_elim = torch.full_like(ent_cached, float("-inf"))
             for i in range(self.valid_next.size(0)):
@@ -1270,8 +1655,13 @@ class ForwardBatchRunner:
         else:
             stat_elim = ent_cached.masked_fill(~self.valid_next, float("-inf"))
 
-        normalize_topk = bool(getattr(self.distiller.config, "normalize_topk_by_length", False))
-        use_gls = bool(getattr(self.distiller.config, "gls_enabled", False)) and not normalize_topk
+        normalize_topk = bool(
+            getattr(self.distiller.config, "normalize_topk_by_length", False)
+        )
+        use_gls = (
+            bool(getattr(self.distiller.config, "gls_enabled", False))
+            and not normalize_topk
+        )
         sel_topk_count = 0
         sel_gls_count = 0
         if not use_gls:
@@ -1301,7 +1691,9 @@ class ForwardBatchRunner:
                 keep_mask[i, sel_abs] = True
         else:
             self.distiller._gls_init_if_needed()
-            thr = self.distiller._gls_threshold(top_percent=self.distiller.config.k_percent)
+            thr = self.distiller._gls_threshold(
+                top_percent=self.distiller.config.k_percent
+            )
             if thr is None:
                 pct = max(0.0, min(1.0, self.distiller.config.k_percent / 100.0))
                 shared_quota = None
@@ -1334,8 +1726,15 @@ class ForwardBatchRunner:
             vals = stat_elim[self.valid_next].detach().float().to("cpu")
             vals = vals[torch.isfinite(vals)]
             self.distiller._gls_push(vals)
-            if getattr(self.distiller.config, "gls_log_threshold", False) and ('thr' in locals()) and thr is not None and self.distiller.logger:
-                self.distiller.logger.log_scalar("train/gls_threshold", float(thr), self.distiller.global_step)
+            if (
+                getattr(self.distiller.config, "gls_log_threshold", False)
+                and ("thr" in locals())
+                and thr is not None
+                and self.distiller.logger
+            ):
+                self.distiller.logger.log_scalar(
+                    "train/gls_threshold", float(thr), self.distiller.global_step
+                )
         if self.distiller.logger:
             self.distiller.logger.log(
                 {
@@ -1360,10 +1759,16 @@ class ForwardBatchRunner:
                 vec = combined[mask_i].float()
             else:
                 if ent_for_bucket is None:
-                    ent_for_bucket = self.distiller._entropy_for_selection(self.input_ids, t_pred=None).to(self.distiller.student_device)
+                    ent_for_bucket = self.distiller._entropy_for_selection(
+                        self.input_ids, t_pred=None
+                    ).to(self.distiller.student_device)
                 vec = ent_for_bucket[i][mask_i].float()
-            low = torch.quantile(vec, self.distiller.config.bucket_lower_percent / 100.0)
-            high = torch.quantile(vec, self.distiller.config.bucket_upper_percent / 100.0)
+            low = torch.quantile(
+                vec, self.distiller.config.bucket_lower_percent / 100.0
+            )
+            high = torch.quantile(
+                vec, self.distiller.config.bucket_upper_percent / 100.0
+            )
             rel = torch.where(mask_i)[0]
             sel = (vec >= low) & (vec <= high)
             if sel.any():
@@ -1393,7 +1798,9 @@ class ForwardBatchRunner:
                 rel = torch.multinomial(probs, num_samples=k, replacement=False)
                 sel_abs = valid_idx_i[rel]
             else:
-                perm = torch.randperm(valid_idx_i.numel(), device=self.distiller.student_device)
+                perm = torch.randperm(
+                    valid_idx_i.numel(), device=self.distiller.student_device
+                )
                 sel_abs = valid_idx_i[perm[:k]]
             keep_mask[i, sel_abs] = True
         return keep_mask
@@ -1419,7 +1826,9 @@ class ForwardBatchRunner:
         self.ce_loss_override = None
 
     def _handle_cache_miss_kd_loss(self) -> None:
-        assert self.t_log_probs is not None and self.t_pred is not None, "Teacher logits required for online RS-KD when cache missing"
+        assert self.t_log_probs is not None and self.t_pred is not None, (
+            "Teacher logits required for online RS-KD when cache missing"
+        )
         t_logp_Tkd = self.t_log_probs.to(self.distiller.student_device)
         p_Tkd = t_logp_Tkd.exp()
 
@@ -1458,7 +1867,9 @@ class ForwardBatchRunner:
                 V = self.s_pred.size(-1)
                 targets = targets.clamp(min=-1, max=V - 1)
                 if self.ce_selection_mask is not None and not self.ce_all_tokens:
-                    mask_override = self.ce_selection_mask.to(self.ce_mask.device).bool()
+                    mask_override = self.ce_selection_mask.to(
+                        self.ce_mask.device
+                    ).bool()
                     ce_mask_effective = self.ce_mask & mask_override
                 else:
                     ce_mask_effective = self.ce_mask
@@ -1472,7 +1883,11 @@ class ForwardBatchRunner:
                 valid_range_mask = (flat_targets >= 0) & (flat_targets < V)
                 invalid_range_mask = ~(ignore_mask | valid_range_mask)
                 if invalid_range_mask.any():
-                    bad_vals = flat_targets[invalid_range_mask].detach().to("cpu", non_blocking=True)
+                    bad_vals = (
+                        flat_targets[invalid_range_mask]
+                        .detach()
+                        .to("cpu", non_blocking=True)
+                    )
                     bad_count = int(bad_vals.numel())
                     flat_targets = flat_targets.masked_fill(invalid_range_mask, -100)
                     if bad_count > 0 and not self.distiller._warned_invalid_targets:
@@ -1503,21 +1918,39 @@ class ForwardBatchRunner:
                         self.distiller._warned_invalid_logprob = True
 
                 if (flat_targets != -100).any():
-                    self.ce_loss = F.nll_loss(flat_log_probs, flat_targets, ignore_index=-100, reduction="mean")
+                    self.ce_loss = F.nll_loss(
+                        flat_log_probs,
+                        flat_targets,
+                        ignore_index=-100,
+                        reduction="mean",
+                    )
                 else:
-                    self.ce_loss = torch.zeros((), device=self.distiller.student_device, dtype=self.s_pred.dtype)
+                    self.ce_loss = torch.zeros(
+                        (),
+                        device=self.distiller.student_device,
+                        dtype=self.s_pred.dtype,
+                    )
 
-            use_unbounded = bool(getattr(self.distiller.config, "unbounded_to_1_loss", False)) and self.distill_type == "dkd"
+            use_unbounded = (
+                bool(getattr(self.distiller.config, "unbounded_to_1_loss", False))
+                and self.distill_type == "dkd"
+            )
             if use_unbounded:
                 self.total = self.kd_loss + self.ce_loss
             else:
-                self.total = (1.0 - self.distiller.config.alpha_ce) * self.kd_loss + self.distiller.config.alpha_ce * self.ce_loss
+                self.total = (
+                    1.0 - self.distiller.config.alpha_ce
+                ) * self.kd_loss + self.distiller.config.alpha_ce * self.ce_loss
         else:
             self.ce_loss = torch.tensor(0.0, device=self.distiller.student_device)
             self.total = self.kd_loss
 
     def _final_checks(self) -> None:
-        if (not torch.isfinite(self.total)) or (not torch.isfinite(self.kd_loss)) or (not torch.isfinite(self.ce_loss)):
+        if (
+            (not torch.isfinite(self.total))
+            or (not torch.isfinite(self.kd_loss))
+            or (not torch.isfinite(self.ce_loss))
+        ):
             print(
                 "[warn] skipping batch due to non-finite loss "
                 f"(total={self.total.item()}, kd={self.kd_loss.item()}, ce={self.ce_loss.item()})"
@@ -1531,5 +1964,6 @@ class ForwardBatchRunner:
 
         self.kd_loss_scalar = self.kd_loss.item()
         self.ce_loss_scalar = self.ce_loss.item()
+
 
 __all__ = ["ForwardBatchRunner"]

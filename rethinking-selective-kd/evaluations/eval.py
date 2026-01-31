@@ -16,7 +16,7 @@ import csv
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Union, Set
-from sampledkd.run_registry import compute_params_hash, upsert_eval_results
+from sekd.run_registry import compute_params_hash, upsert_eval_results
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -40,11 +40,13 @@ if "HF_DATASETS_CACHE" not in os.environ:
     _tmp = os.environ.get("TMPDIR", "/tmp")
     os.environ["HF_DATASETS_CACHE"] = os.path.join(_tmp, "hf_datasets")
 
+
 def _safe_int_env(key: str, default: int) -> int:
     try:
         return int(os.getenv(key, str(default)))
     except Exception:
         return default
+
 
 IF_EVAL_SAMPLE_LIMIT = _safe_int_env("IF_EVAL_SAMPLE_LIMIT", 0)
 IF_EVAL_MAX_NEW_TOKENS = _safe_int_env("IF_EVAL_MAX_NEW_TOKENS", 512)
@@ -103,38 +105,55 @@ def validate_model_directory(model_dir: Path) -> None:
 
 def load_tokenizer_with_fallback(model_path: str | Path) -> "AutoTokenizer":
     """Load tokenizer from model path, falling back to FALLBACK_TOKENIZER if not found.
-    
+
     All our distilled models use the same Qwen tokenizer, so we can safely
     use a fallback when the model directory is incomplete.
     """
     model_path = Path(model_path) if isinstance(model_path, str) else model_path
-    
+
     # Check if tokenizer files exist
-    tokenizer_files = ["tokenizer.json", "tokenizer_config.json", "vocab.json", "spiece.model", "tokenizer.model"]
-    has_tokenizer = model_path.is_dir() and any((model_path / f).exists() for f in tokenizer_files)
-    
+    tokenizer_files = [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "spiece.model",
+        "tokenizer.model",
+    ]
+    has_tokenizer = model_path.is_dir() and any(
+        (model_path / f).exists() for f in tokenizer_files
+    )
+
     if has_tokenizer:
         try:
-            return AutoTokenizer.from_pretrained(str(model_path), use_fast=False, trust_remote_code=True)
+            return AutoTokenizer.from_pretrained(
+                str(model_path), use_fast=False, trust_remote_code=True
+            )
         except Exception as e:
             print(f"[warn] Failed to load tokenizer from {model_path}: {e}")
             print(f"[warn] Falling back to {FALLBACK_TOKENIZER}")
     else:
-        print(f"[info] No tokenizer files in {model_path}, using fallback: {FALLBACK_TOKENIZER}")
-    
-    return AutoTokenizer.from_pretrained(FALLBACK_TOKENIZER, use_fast=False, trust_remote_code=True)
+        print(
+            f"[info] No tokenizer files in {model_path}, using fallback: {FALLBACK_TOKENIZER}"
+        )
+
+    return AutoTokenizer.from_pretrained(
+        FALLBACK_TOKENIZER, use_fast=False, trust_remote_code=True
+    )
 
 
 # ---------- Logging imports ----------
 try:
-    from sampledkd.logging.wandb_utils import (
+    from sekd.logging.wandb_utils import (
         WandBLogger,
         log_evaluation_to_wandb,
         log_evaluation_to_tensorboard,
     )
 except ImportError:
     WandBLogger = None  # type: ignore
-    log_evaluation_to_wandb = log_evaluation_to_tensorboard = lambda *args, **kwargs: None
+    log_evaluation_to_wandb = log_evaluation_to_tensorboard = (
+        lambda *args, **kwargs: None
+    )
+
 
 # ---------- Pydantic Models for Configuration ----------
 class EvalGenerationConfig(BaseModel):
@@ -142,10 +161,12 @@ class EvalGenerationConfig(BaseModel):
     do_sample: bool = False
     temperature: float = 0.0
 
+
 class MetricConfig(BaseModel):
     metric: str
     aggregation: str = "mean"
     higher_is_better: bool = True
+
 
 class TaskConfig(BaseModel):
     task: str  # lm-eval expects "task" field
@@ -155,20 +176,27 @@ class TaskConfig(BaseModel):
     validation_split: Optional[str] = None
     train_split: Optional[str] = None
     output_type: str = "generate_until"
-    generation_kwargs: EvalGenerationConfig = Field(default_factory=EvalGenerationConfig)
+    generation_kwargs: EvalGenerationConfig = Field(
+        default_factory=EvalGenerationConfig
+    )
     metric_list: List[MetricConfig] = Field(default_factory=list)
     process_docs: Optional[str] = None
     process_results: Optional[str] = None
     num_fewshot: int = 0
 
+
 class BenchmarkConfig(BaseModel):
     task: List[TaskConfig] = Field(alias="manual_tasks")
     model_config = ConfigDict(populate_by_name=True)
 
+
 class _BenchmarkSafeLoader(yaml.SafeLoader):
     """YAML loader that gracefully handles custom tags like !function."""
 
-def _construct_unknown_tag(loader: _BenchmarkSafeLoader, tag_suffix: str, node: yaml.Node):
+
+def _construct_unknown_tag(
+    loader: _BenchmarkSafeLoader, tag_suffix: str, node: yaml.Node
+):
     if isinstance(node, yaml.ScalarNode):
         return loader.construct_scalar(node)
     if isinstance(node, yaml.SequenceNode):
@@ -177,7 +205,9 @@ def _construct_unknown_tag(loader: _BenchmarkSafeLoader, tag_suffix: str, node: 
         return loader.construct_mapping(node)
     raise TypeError(f"Unsupported YAML node type for custom tag: {type(node)}")
 
+
 _BenchmarkSafeLoader.add_multi_constructor("!", _construct_unknown_tag)
+
 
 def load_benchmark_config(config_path: Path) -> BenchmarkConfig:
     """Load and validate benchmark configuration from YAML."""
@@ -189,6 +219,7 @@ def load_benchmark_config(config_path: Path) -> BenchmarkConfig:
 def _bool_to_yaml(value: bool) -> str:
     return "true" if value else "false"
 
+
 def _normalize_func_ref(ref: str) -> str:
     # Accept "path/to/file.py:fn" or "pkg.mod:fn". Convert the latter to a file path.
     if ":" not in ref:
@@ -197,6 +228,7 @@ def _normalize_func_ref(ref: str) -> str:
     if head.endswith(".py") or "/" in head:
         return f"{head}:{func}"
     return f"{head.replace('.', '/')}.py:{func}"
+
 
 def _render_manual_task(task: TaskConfig) -> str:
     lines = [f"task: {task.task}", f"dataset_path: {task.dataset_path}"]
@@ -224,17 +256,23 @@ def _render_manual_task(task: TaskConfig) -> str:
     lines.append('    - "</s>"')
     lines.append('    - "<|im_end|>"')
     if task.process_docs:
-        lines.append(f"process_docs: !function {_normalize_func_ref(task.process_docs)}")
+        lines.append(
+            f"process_docs: !function {_normalize_func_ref(task.process_docs)}"
+        )
     if task.metric_list:
         lines.append("metric_list:")
         for metric in task.metric_list:
-            lines.extend([
-                f"  - metric: {metric.metric}",
-                f"    aggregation: {metric.aggregation}",
-                f"    higher_is_better: {_bool_to_yaml(metric.higher_is_better)}",
-            ])
+            lines.extend(
+                [
+                    f"  - metric: {metric.metric}",
+                    f"    aggregation: {metric.aggregation}",
+                    f"    higher_is_better: {_bool_to_yaml(metric.higher_is_better)}",
+                ]
+            )
     if task.process_results:
-        lines.append(f"process_results: !function {_normalize_func_ref(task.process_results)}")
+        lines.append(
+            f"process_results: !function {_normalize_func_ref(task.process_results)}"
+        )
     lines.extend([f"num_fewshot: {task.num_fewshot}", ""])
     return "\n".join(lines)
 
@@ -288,16 +326,23 @@ def materialize_manual_tasks(config: BenchmarkConfig, cache_root: Path) -> Path:
     src_utils = Path(__file__).with_name("utils.py")
     if src_utils.exists():
         # Copy as a flattened module name for lm-eval to find
-        shutil.copy2(src_utils, manual_dir / "sampledkd.evaluations.utils.py")
+        shutil.copy2(src_utils, manual_dir / "sekd.evaluations.utils.py")
     return manual_dir
 
 
 # ---------- Utility ----------
-def run(cmd: List[str], env: Optional[Dict[str, str]] = None, cwd: Optional[str] = None, timeout: Optional[int] = None) -> Tuple[int, str]:
+def run(
+    cmd: List[str],
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> Tuple[int, str]:
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"\n[{timestamp}] $ {' '.join(cmd)}")
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, env=env, cwd=cwd, text=True, timeout=timeout)
+        out = subprocess.check_output(
+            cmd, stderr=subprocess.STDOUT, env=env, cwd=cwd, text=True, timeout=timeout
+        )
         end_timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{end_timestamp}] Command completed:")
         print(out)
@@ -312,10 +357,14 @@ def run(cmd: List[str], env: Optional[Dict[str, str]] = None, cwd: Optional[str]
         print(f"[{end_timestamp}] Command timed out after {timeout} seconds: {e}")
         return 124, f"Timeout after {timeout} seconds"
 
+
 def run_async(cmd: List[str], env: Optional[Dict[str, str]] = None) -> subprocess.Popen:
     timestamp = datetime.now().strftime("%H:%M:%S")
     print(f"\n[{timestamp}] $ (async) {' '.join(cmd)}")
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    return subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
+    )
+
 
 def wait_with_timeout(proc: subprocess.Popen, timeout: int) -> Tuple[int, str]:
     try:
@@ -337,19 +386,23 @@ def wait_with_timeout(proc: subprocess.Popen, timeout: int) -> Tuple[int, str]:
         print(out or "")
         return 124, out or ""
 
+
 def find_latest_checkpoint(dir_path: Path) -> Optional[Path]:
     if not dir_path.exists():
         return None
     candidates = sorted(dir_path.glob("checkpoint_epoch*_step*.pt"))
     if not candidates:
         return None
+
     def key(p: Path):
         m = re.search(r"epoch(\d+)_step(\d+)", p.name)
         if m:
             return (int(m.group(1)), int(m.group(2)))
         return (-1, -1)
+
     candidates.sort(key=key)
     return candidates[-1]
+
 
 def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     h = hashlib.sha256()
@@ -364,7 +417,7 @@ def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
 
 def export_hf_model(base_model_dir: str, ckpt_path: Path, export_dir: Path) -> None:
     """Export a HF-ready directory from base weights + checkpoint.
-       Skips work if kd_export_meta.json matches the checkpoint hash.
+    Skips work if kd_export_meta.json matches the checkpoint hash.
     """
     export_dir.mkdir(parents=True, exist_ok=True)
     meta_path = export_dir / "kd_export_meta.json"
@@ -375,12 +428,16 @@ def export_hf_model(base_model_dir: str, ckpt_path: Path, export_dir: Path) -> N
         try:
             old = json.load(open(meta_path))
             if old.get("ckpt_sha256") == ckpt_hash:
-                print(f"[export] Cache hit for {export_dir} (ckpt unchanged). Skipping export.")
+                print(
+                    f"[export] Cache hit for {export_dir} (ckpt unchanged). Skipping export."
+                )
                 return
         except Exception:
             pass
 
-    print(f"Exporting model from base '{base_model_dir}' with state_dict '{ckpt_path.name}' -> '{export_dir}'")
+    print(
+        f"Exporting model from base '{base_model_dir}' with state_dict '{ckpt_path.name}' -> '{export_dir}'"
+    )
 
     # Always load tokenizer (with fallback to Qwen if not found in model dir)
     tok = load_tokenizer_with_fallback(base_model_dir)
@@ -443,8 +500,10 @@ def export_hf_model(base_model_dir: str, ckpt_path: Path, export_dir: Path) -> N
         json.dump(meta, f, indent=2)
     print(f"[export] Wrote {meta_path}")
 
+
 def ensure_dir(d: Path) -> None:
     d.mkdir(parents=True, exist_ok=True)
+
 
 def which(bin_name: str) -> bool:
     return shutil.which(bin_name) is not None
@@ -473,6 +532,7 @@ def _ensure_allocator_safe_env(env: Dict[str, str]) -> None:
         updated.append("expandable_segments:False")
     env[key] = ",".join(updated)
 
+
 # ---------- GPU helpers ----------
 def visible_gpu_ids() -> List[int]:
     """Return the list of visible GPU ids from CUDA_VISIBLE_DEVICES or torch."""
@@ -486,6 +546,7 @@ def visible_gpu_ids() -> List[int]:
         return list(range(torch.cuda.device_count()))
     return []
 
+
 def pick_gpu_pool(max_workers: Optional[int] = None) -> List[int]:
     ids = visible_gpu_ids()
     if max_workers is not None:
@@ -493,6 +554,7 @@ def pick_gpu_pool(max_workers: Optional[int] = None) -> List[int]:
     if not ids:
         print("No CUDA devices visible, defaulting to CPU (will be slow).")
     return ids
+
 
 # Map HF model families -> default decoder layer class for FSDP auto-wrapping
 FSDP_LAYER_CLS_BY_MODEL_FAMILY: Dict[str, str] = {
@@ -566,7 +628,9 @@ def _try_dynamic_discovery(model_type: str, cfg: Optional[Any]) -> Optional[str]
         preferred = [
             name
             for name in candidates
-            if family.capitalize() in name or family.title() in name or family_upper in name
+            if family.capitalize() in name
+            or family.title() in name
+            or family_upper in name
         ]
         return preferred[0] if preferred else candidates[0]
     return None
@@ -629,21 +693,30 @@ def detect_fsdp_layer_cls(model_identifier: Union[str, Path]) -> Optional[str]:
     family = _normalize_family(model_type_lc)
     mapped = FSDP_LAYER_CLS_BY_MODEL_FAMILY.get(family)
     if mapped:
-        print(f"[fsdp] Using mapped transformer layer '{mapped}' for model_type='{model_type}'.")
+        print(
+            f"[fsdp] Using mapped transformer layer '{mapped}' for model_type='{model_type}'."
+        )
         return mapped
 
     dynamic = _try_dynamic_discovery(model_type_lc, cfg)
     if dynamic:
-        print(f"[fsdp] Auto-discovered transformer layer '{dynamic}' for model_type='{model_type}'.")
+        print(
+            f"[fsdp] Auto-discovered transformer layer '{dynamic}' for model_type='{model_type}'."
+        )
         return dynamic
 
     meta_cls = _try_meta_sniff(cfg)
     if meta_cls:
-        print(f"[fsdp] Meta-sniffed transformer layer '{meta_cls}' for model_type='{model_type}'.")
+        print(
+            f"[fsdp] Meta-sniffed transformer layer '{meta_cls}' for model_type='{model_type}'."
+        )
         return meta_cls
 
-    print(f"[fsdp] Warning: could not identify a decoder layer class for model_type='{model_type}'.")
+    print(
+        f"[fsdp] Warning: could not identify a decoder layer class for model_type='{model_type}'."
+    )
     return None
+
 
 # ==========================================================
 #                      SUITE DEFINITIONS
@@ -662,7 +735,7 @@ _BASE_LIGHT_LMEVAL_TASKS: List[Tuple[str, Optional[int]]] = [
     ("hellaswag", None),
     ("piqa", None),
     # ("svamp", 250),
-    ("lambada_openai", None), 
+    ("lambada_openai", None),
     # normalized accuracy - multiple-choice datasets.raw accuracy can mislead so normalization accounts for imbalanced choices
     # ("arc_challenge", None),
     # exact-match
@@ -678,7 +751,9 @@ IF_TASK_SPECS = [
         "metric_key": "strict_accuracy",
     }
 ]
-IF_TABLE_TASKS: List[Tuple[str, Optional[int]]] = [(spec["name"], None) for spec in IF_TASK_SPECS]
+IF_TABLE_TASKS: List[Tuple[str, Optional[int]]] = [
+    (spec["name"], None) for spec in IF_TASK_SPECS
+]
 IF_TASK_NAMES = {spec["name"] for spec in IF_TASK_SPECS}
 # Optional tiny adds (off by default): BoolQ 200, HumanEval full
 LIGHT_ENABLE_OPTIONALS = os.environ.get("LIGHT_EXTRAS", "0") == "1"
@@ -691,21 +766,21 @@ HEAVY_LMEVAL_TASKS: List[Tuple[str, Optional[int]]] = [
     # Reasoning & math
     ("gsm8k", None),
     ("svamp", None),
-    ("asdiv", None), # arithmetic subset (ASDiv-A handled inside task)
+    ("asdiv", None),  # arithmetic subset (ASDiv-A handled inside task)
     ("hendrycks_math", None),  # MATH
     ("aime25", None),
     ("olympiadbench", None),
     ("piqa", None),
     ("lambada_openai", None),
-     # General reasoning
+    # General reasoning
     ("agieval", None),
-    ("bbh", None), # BIG-Bench Hard
+    ("bbh", None),  # BIG-Bench Hard
     ("agieval", None),
     # QA / multi-hop
     ("squadv2", None),
     ("hotpotqa", None),
     ("nq_open", None),
-     # Commonsense
+    # Commonsense
     ("hellaswag", None),
     ("arc_easy", None),
     ("arc_challenge", None),
@@ -761,6 +836,7 @@ LM_EVAL_TEST_SPLITS: Dict[str, str] = {
     "lambada_openai": "test",
     "arc_easy": "test",
 }
+
 
 # ==========================================================
 #                  LM-Eval runner with suites
@@ -830,7 +906,11 @@ def run_lmeval_suite(
 
     # Exclude LAMBADA and IFEval from validation suite (they run in full on test only)
     if phase == "validation":
-        excluded = [name for name, _ in tasks_with_limits if name.split(",", 1)[0] in VALIDATION_EXCLUDED_TASKS]
+        excluded = [
+            name
+            for name, _ in tasks_with_limits
+            if name.split(",", 1)[0] in VALIDATION_EXCLUDED_TASKS
+        ]
         if excluded:
             print(f"[lm-eval] Excluding from validation suite (test-only): {excluded}")
         tasks_with_limits = [
@@ -844,7 +924,9 @@ def run_lmeval_suite(
         return None
 
     if use_fsdp and (load_in_8bit or load_in_4bit):
-        print("[fsdp] Warning: --use-fsdp cannot be combined with bitsandbytes quantization flags; disabling FSDP for this run.")
+        print(
+            "[fsdp] Warning: --use-fsdp cannot be combined with bitsandbytes quantization flags; disabling FSDP for this run."
+        )
         use_fsdp = False
 
     if use_fsdp and len(gpu_ids) < 2:
@@ -861,6 +943,7 @@ def run_lmeval_suite(
     # preflight: load task registry to filter unknown tasks (but allow external include_path)
     try:
         from lm_eval import tasks as _tasks_mod  # type: ignore
+
         _available = set(getattr(_tasks_mod, "TASK_REGISTRY", {}).keys())
     except Exception:
         _available = set()
@@ -883,7 +966,9 @@ def run_lmeval_suite(
             else:
                 skipped_tasks.append(task_name)
         if skipped_tasks:
-            print(f"[lm-eval] Skipping non-registry tasks (handled separately): {skipped_tasks}")
+            print(
+                f"[lm-eval] Skipping non-registry tasks (handled separately): {skipped_tasks}"
+            )
         tasks_with_limits = filtered_tasks
     else:
         tmp_tasks: List[Tuple[str, Optional[int]]] = []
@@ -932,15 +1017,24 @@ def run_lmeval_suite(
 
     resolved_model_dtype: Optional[str] = None
     dtype_request = model_dtype.strip() if isinstance(model_dtype, str) else ""
-    auto_requested = dtype_request == "" or dtype_request.lower() in {"auto", "detect", "default", "none"}
+    auto_requested = dtype_request == "" or dtype_request.lower() in {
+        "auto",
+        "detect",
+        "default",
+        "none",
+    }
     if auto_requested:
         resolved_model_dtype = _infer_model_dtype_from_config(model_dir)
         if resolved_model_dtype:
-            print(f"[models] Auto-detected dtype '{resolved_model_dtype}' from {model_dir}/config.json")
+            print(
+                f"[models] Auto-detected dtype '{resolved_model_dtype}' from {model_dir}/config.json"
+            )
     else:
         resolved_model_dtype = _normalize_dtype_name(dtype_request)
         if resolved_model_dtype is None and dtype_request:
-            print(f"[models] Warning: unknown dtype '{model_dtype}'; letting HF defaults apply.")
+            print(
+                f"[models] Warning: unknown dtype '{model_dtype}'; letting HF defaults apply."
+            )
     model_dtype = resolved_model_dtype
 
     model_arg_parts = [
@@ -955,7 +1049,12 @@ def run_lmeval_suite(
         if model_dtype:
             model_arg_parts.append(f"dtype={model_dtype}")
     effective_device_map = None if use_fsdp else device_map
-    if not effective_device_map and not use_fsdp and share_gpu_pool and len(gpu_ids) > 1:
+    if (
+        not effective_device_map
+        and not use_fsdp
+        and share_gpu_pool
+        and len(gpu_ids) > 1
+    ):
         effective_device_map = "balanced_low_0"
     if effective_device_map:
         model_arg_parts.append(f"device_map={effective_device_map}")
@@ -969,7 +1068,7 @@ def run_lmeval_suite(
             "--standalone",
             f"--nproc_per_node={len(gpu_ids)}",
             "--module",
-            "sampledkd.evaluations.lm_eval_entry",
+            "sekd.evaluations.lm_eval_entry",
         ]
 
     base_args = [
@@ -986,7 +1085,9 @@ def run_lmeval_suite(
     if _has_log_samples:
         base_args += ["--log_samples"]
     else:
-        print("[lm-eval] This lm-eval version lacks --log_samples; will skip ECE metrics.")
+        print(
+            "[lm-eval] This lm-eval version lacks --log_samples; will skip ECE metrics."
+        )
     if _has_seed_flag:
         base_args += ["--seed", str(seed)]
     elif _has_fewshot_seed_flag:
@@ -1003,16 +1104,25 @@ def run_lmeval_suite(
         device: str,
         override_batch: Optional[str] = None,
     ) -> Tuple[List[str], str, bool]:
-        nonlocal _warned_no_random_limit, _warned_no_max_batch_flag, \
-            _warned_no_generate_max_batch_flag, _warned_no_task_args_flag
+        nonlocal \
+            _warned_no_random_limit, \
+            _warned_no_max_batch_flag, \
+            _warned_no_generate_max_batch_flag, \
+            _warned_no_task_args_flag
         cmd = entry_prefix + base_args + ["--tasks", task, "--device", device]
         GENERATE_BS1 = {"gsm8k", "svamp", "aime25"}
         is_generate = task in GENERATE_BS1
-        batch_value = str(override_batch) if override_batch is not None else (
-            default_generate_batch_size if is_generate else default_batch_size
+        batch_value = (
+            str(override_batch)
+            if override_batch is not None
+            else (default_generate_batch_size if is_generate else default_batch_size)
         )
         cmd += ["--batch_size", batch_value]
-        target_max = effective_generate_max_batch_size if is_generate else effective_max_batch_size
+        target_max = (
+            effective_generate_max_batch_size
+            if is_generate
+            else effective_max_batch_size
+        )
         if target_max > 0:
             flag = None
             if is_generate and _generate_max_batch_flag:
@@ -1023,10 +1133,14 @@ def run_lmeval_suite(
                 cmd += [flag, str(target_max)]
             else:
                 if is_generate and not _warned_no_generate_max_batch_flag:
-                    print("[lm-eval] Warning: CLI lacks a generate max batch size flag; skipping cap.")
+                    print(
+                        "[lm-eval] Warning: CLI lacks a generate max batch size flag; skipping cap."
+                    )
                     _warned_no_generate_max_batch_flag = True
                 elif not is_generate and not _warned_no_max_batch_flag:
-                    print("[lm-eval] Warning: CLI lacks a max batch size flag; skipping cap.")
+                    print(
+                        "[lm-eval] Warning: CLI lacks a max batch size flag; skipping cap."
+                    )
                     _warned_no_max_batch_flag = True
         if isinstance(limit, (int, float)):
             cmd += ["--limit", str(limit)]
@@ -1037,16 +1151,22 @@ def run_lmeval_suite(
                 cmd += ["--limit_mode", "random"]
             else:
                 if not _warned_no_random_limit:
-                    print("[lm-eval] Warning: CLI lacks a random subset flag; using first-N for --limit.")
+                    print(
+                        "[lm-eval] Warning: CLI lacks a random subset flag; using first-N for --limit."
+                    )
                     _warned_no_random_limit = True
         if task_split_overrides:
             base_task = task.split(",", 1)[0]
-            override_split = task_split_overrides.get(task) or task_split_overrides.get(base_task)
+            override_split = task_split_overrides.get(task) or task_split_overrides.get(
+                base_task
+            )
             if override_split:
                 if _task_args_flag:
                     cmd += [_task_args_flag, f"{base_task}:split={override_split}"]
                 elif not _warned_no_task_args_flag:
-                    print("[lm-eval] Warning: CLI lacks a task args flag; cannot override split.")
+                    print(
+                        "[lm-eval] Warning: CLI lacks a task args flag; cannot override split."
+                    )
                     _warned_no_task_args_flag = True
         return cmd, batch_value, is_generate
 
@@ -1070,9 +1190,13 @@ def run_lmeval_suite(
         wave_names = [t for (t, _) in wave]
         timestamp = datetime.now().strftime("%H:%M:%S")
         if share_gpu_pool:
-            print(f"[{timestamp}] [lm-eval] Launching wave: {wave_names} on shared GPUs {shared_gpu_env}")
+            print(
+                f"[{timestamp}] [lm-eval] Launching wave: {wave_names} on shared GPUs {shared_gpu_env}"
+            )
         else:
-            print(f"[{timestamp}] [lm-eval] Launching wave: {wave_names} on GPUs {gpu_ids}")
+            print(
+                f"[{timestamp}] [lm-eval] Launching wave: {wave_names} on GPUs {gpu_ids}"
+            )
         for (task, limit), gpu_assignment in zip(wave, gpu_assignments):
             env = os.environ.copy()
             # IMPORTANT: When a single GPU is available/selected, do not override
@@ -1085,7 +1209,9 @@ def run_lmeval_suite(
             # When running a single GPU, prefer the parent's CUDA mask if present; otherwise, use the
             # physical GPU index directly via --device cuda:N.
             if len(gpu_ids) > 1:
-                env["CUDA_VISIBLE_DEVICES"] = gpu_assignment  # inside, cuda:0 maps within this pool
+                env["CUDA_VISIBLE_DEVICES"] = (
+                    gpu_assignment  # inside, cuda:0 maps within this pool
+                )
             py_path_parts = [include_path, repo_root]
             if env.get("PYTHONPATH"):
                 py_path_parts.append(env["PYTHONPATH"])
@@ -1096,7 +1222,11 @@ def run_lmeval_suite(
             env.setdefault("EVAL_SEED", str(seed))
             env.setdefault("OMP_NUM_THREADS", "1")
             _ensure_allocator_safe_env(env)
-            device = "cuda:0" if parent_has_cuda_mask else f"cuda:{gpu_assignment.split(',')[0]}"
+            device = (
+                "cuda:0"
+                if parent_has_cuda_mask
+                else f"cuda:{gpu_assignment.split(',')[0]}"
+            )
             if use_fsdp:
                 env.setdefault("MASTER_ADDR", "127.0.0.1")
                 env.setdefault("MASTER_PORT", str(20000 + random.randint(0, 20000)))
@@ -1137,18 +1267,25 @@ def run_lmeval_suite(
             timestamp = datetime.now().strftime("%H:%M:%S")
             if rc == 0:
                 status_suffix = " (fallback)" if fallback_used else ""
-                print(f"[{timestamp}] ✅ Task {task} completed successfully in {duration:.1f}s{status_suffix}")
+                print(
+                    f"[{timestamp}] ✅ Task {task} completed successfully in {duration:.1f}s{status_suffix}"
+                )
                 task_status[task] = "ok"
                 good_any = True
             elif rc == 124:
-                print(f"[{timestamp}] ⏰ Task {task} timed out after {to} seconds (wall {duration:.1f}s)")
+                print(
+                    f"[{timestamp}] ⏰ Task {task} timed out after {to} seconds (wall {duration:.1f}s)"
+                )
                 task_status[task] = "timeout"
             else:
-                print(f"[{timestamp}] ❌ Task {task} failed with code {rc} in {duration:.1f}s")
+                print(
+                    f"[{timestamp}] ❌ Task {task} failed with code {rc} in {duration:.1f}s"
+                )
                 task_status[task] = f"failed:{rc}"
             task_durations[task] = duration
         i += len(wave)
     return out_dir if good_any else None, task_status, task_durations
+
 
 # ---------- ECE (Expected Calibration Error) from LM-Eval samples ----------
 def _softmax(xs: List[float]) -> List[float]:
@@ -1159,7 +1296,10 @@ def _softmax(xs: List[float]) -> List[float]:
     s = sum(exps)
     return [e / s for e in exps]
 
-def compute_ece(confidences: List[float], correctness: List[int], n_bins: int = 15) -> float:
+
+def compute_ece(
+    confidences: List[float], correctness: List[int], n_bins: int = 15
+) -> float:
     """Compute Expected Calibration Error for top-1 predictions.
 
     Args:
@@ -1193,7 +1333,10 @@ def compute_ece(confidences: List[float], correctness: List[int], n_bins: int = 
         ece += (m / n) * abs(acc_i - conf_i)
     return ece
 
-def _parse_sample_line_for_mc(line: Dict[str, Any]) -> Optional[Tuple[List[float], int]]:
+
+def _parse_sample_line_for_mc(
+    line: Dict[str, Any],
+) -> Optional[Tuple[List[float], int]]:
     """Attempt to extract (choice_scores, gold_index) from an lm-eval sample JSONL line.
 
     Returns list of scores (higher is better, e.g., log-likelihoods) and gold index.
@@ -1248,14 +1391,24 @@ def _parse_sample_line_for_mc(line: Dict[str, Any]) -> Optional[Tuple[List[float
                     break
     if gold_idx is None:
         # Some tasks log gold as letter (A/B/C/D)
-        gold = line.get("gold") or line.get("answer") or (line.get("doc") or {}).get("gold")
-        if isinstance(gold, str) and len(gold) == 1 and gold in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
-            gold_idx = ord(gold) - ord('A')
+        gold = (
+            line.get("gold")
+            or line.get("answer")
+            or (line.get("doc") or {}).get("gold")
+        )
+        if (
+            isinstance(gold, str)
+            and len(gold) == 1
+            and gold in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ):
+            gold_idx = ord(gold) - ord("A")
 
     # Collect choice scores
     scores: Optional[List[float]] = None
     raw_choice_scores = line.get("choice_scores")
-    if isinstance(raw_choice_scores, list) and all(isinstance(x, (int, float)) for x in raw_choice_scores):
+    if isinstance(raw_choice_scores, list) and all(
+        isinstance(x, (int, float)) for x in raw_choice_scores
+    ):
         scores = [float(x) for x in raw_choice_scores]
 
     if scores is None and isinstance(line.get("choices"), list) and line["choices"]:
@@ -1263,7 +1416,9 @@ def _parse_sample_line_for_mc(line: Dict[str, Any]) -> Optional[Tuple[List[float
         first = line["choices"][0]
         if isinstance(first, dict):
             for k in cand_keys:
-                if k in first and all(isinstance(c.get(k), (int, float)) for c in line["choices"]):
+                if k in first and all(
+                    isinstance(c.get(k), (int, float)) for c in line["choices"]
+                ):
                     scores = [float(c[k]) for c in line["choices"]]
                     break
 
@@ -1289,7 +1444,10 @@ def _parse_sample_line_for_mc(line: Dict[str, Any]) -> Optional[Tuple[List[float
         return None
     return scores, gold_idx
 
-def collect_ece_from_lmeval_samples(lmeval_dir: Optional[Path], bins: int = 15) -> Dict[str, Dict[str, float]]:
+
+def collect_ece_from_lmeval_samples(
+    lmeval_dir: Optional[Path], bins: int = 15
+) -> Dict[str, Dict[str, float]]:
     """Parse lm-eval sample logs (if present) and compute ECE per multiple-choice task.
 
     Looks for samples/*.jsonl under the lm-eval output directory, extracts per-example
@@ -1325,6 +1483,7 @@ def collect_ece_from_lmeval_samples(lmeval_dir: Optional[Path], bins: int = 15) 
         if "," in stem:
             stem = stem.split(",", 1)[0]
         return stem
+
     for p in files:
         try:
             # Task name from filename (strip extension and normalize)
@@ -1357,13 +1516,18 @@ def collect_ece_from_lmeval_samples(lmeval_dir: Optional[Path], bins: int = 15) 
                 per_task[task_name]["ece_n"] = float(len(confidences))
                 print(f"[ECE] {task_name}: ECE={ece:.4f} (n={len(confidences)})")
             else:
-                print(f"[ECE] {task_name}: Skipped (only {len(confidences)} MC samples, need >=10)")
+                print(
+                    f"[ECE] {task_name}: Skipped (only {len(confidences)} MC samples, need >=10)"
+                )
         except Exception as e:
             print(f"Failed to compute ECE from {p}: {e}")
     return per_task
 
-def _map_ece_to_existing_tasks(ece_metrics: Dict[str, Dict[str, float]],
-                               lmeval_metrics: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+
+def _map_ece_to_existing_tasks(
+    ece_metrics: Dict[str, Dict[str, float]],
+    lmeval_metrics: Dict[str, Dict[str, float]],
+) -> Dict[str, Dict[str, float]]:
     """Map ECE task keys to match the keys present in lm-eval metrics when possible.
 
     lm-eval often uses task keys like "arc_challenge,none" while sample files may yield
@@ -1390,24 +1554,42 @@ def _map_ece_to_existing_tasks(ece_metrics: Dict[str, Dict[str, float]],
             remapped[ece_key] = metrics
     return remapped
 
+
 # ---------- Lighteval (summarization) ----------
-def run_lighteval(model_dir: Path, tag: str, results_dir: Path, suite: str) -> Optional[Path]:
+def run_lighteval(
+    model_dir: Path, tag: str, results_dir: Path, suite: str
+) -> Optional[Path]:
     """Run summarization only for HEAVY suite (CNN/DM, XSum)."""
     if suite != "heavy":
         print("[lighteval] Skipping summarization for light suite.")
         return None
     out_path = results_dir / f"lighteval_{tag}.json"
-    tasks = [t.replace("-", "_") for t in LIGHTEVAL_TASKS]  # normalize hyphen → underscore
+    tasks = [
+        t.replace("-", "_") for t in LIGHTEVAL_TASKS
+    ]  # normalize hyphen → underscore
     code = 1
     for cmd in (
         [
-            "lighteval", "--model", "hf", str(model_dir),
-            "--tasks", ",".join(tasks), "--results", str(out_path),
+            "lighteval",
+            "--model",
+            "hf",
+            str(model_dir),
+            "--tasks",
+            ",".join(tasks),
+            "--results",
+            str(out_path),
         ],
         [
-            sys.executable, "-m", "lighteval",
-            "--model", "hf", str(model_dir),
-            "--tasks", ",".join(tasks), "--results", str(out_path),
+            sys.executable,
+            "-m",
+            "lighteval",
+            "--model",
+            "hf",
+            str(model_dir),
+            "--tasks",
+            ",".join(tasks),
+            "--results",
+            str(out_path),
         ],
     ):
         code, _ = run(cmd)
@@ -1415,8 +1597,11 @@ def run_lighteval(model_dir: Path, tag: str, results_dir: Path, suite: str) -> O
             break
     return out_path if code == 0 and out_path.exists() else None
 
+
 # ---------- EvalPlus (code: HumanEval/MBPP) ----------
-def run_evalplus(model_dir: Path, tag: str, datasets: List[str], suite: str) -> Dict[str, Optional[Path]]:
+def run_evalplus(
+    model_dir: Path, tag: str, datasets: List[str], suite: str
+) -> Dict[str, Optional[Path]]:
     """Run code-gen only for HEAVY suite by default."""
     if suite != "heavy":
         print("[evalplus] Skipping code-gen for light suite.")
@@ -1431,9 +1616,12 @@ def run_evalplus(model_dir: Path, tag: str, datasets: List[str], suite: str) -> 
     for ds_name in datasets:
         cmd = [
             "evalplus.evaluate",
-            "--model", str(model_dir),
-            "--dataset", ds_name,
-            "--backend", "hf",
+            "--model",
+            str(model_dir),
+            "--dataset",
+            ds_name,
+            "--backend",
+            "hf",
             "--greedy",
         ]
         code, _ = run(cmd, env=env)
@@ -1441,8 +1629,11 @@ def run_evalplus(model_dir: Path, tag: str, datasets: List[str], suite: str) -> 
         out[ds_name] = results_root if results_root.exists() and code == 0 else None
     return out
 
+
 # ---------- AlpacaEval 2 (LC win-rates) ----------
-def run_alpacaeval(model_dir: Path, tag: str, results_dir: Path, suite: str) -> Optional[Path]:
+def run_alpacaeval(
+    model_dir: Path, tag: str, results_dir: Path, suite: str
+) -> Optional[Path]:
     if suite != "heavy":
         print("[alpacaeval] Skipping for light suite.")
         return None
@@ -1454,11 +1645,14 @@ def run_alpacaeval(model_dir: Path, tag: str, results_dir: Path, suite: str) -> 
     cmd = [
         "alpaca_eval",
         "evaluate_from_model",
-        "--model", str(model_dir),
-        "--output_path", str(out_dir),
+        "--model",
+        str(model_dir),
+        "--output_path",
+        str(out_dir),
     ]
     code, _ = run(cmd)
     return out_dir if code == 0 else None
+
 
 # ---------- IF-Eval (deterministic, strict) ----------
 def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -1482,7 +1676,9 @@ def _write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
             handle.write("\n")
 
 
-def _sample_rows_seeded(rows: List[Dict[str, Any]], *, limit: int, seed: int) -> List[Dict[str, Any]]:
+def _sample_rows_seeded(
+    rows: List[Dict[str, Any]], *, limit: int, seed: int
+) -> List[Dict[str, Any]]:
     if limit <= 0 or limit >= len(rows):
         return rows
     rng = random.Random(seed)
@@ -1492,7 +1688,9 @@ def _sample_rows_seeded(rows: List[Dict[str, Any]], *, limit: int, seed: int) ->
     return [rows[i] for i in keep]
 
 
-def _generate_det_response(model: AutoModelForCausalLM, tok: AutoTokenizer, prompt: str) -> str:
+def _generate_det_response(
+    model: AutoModelForCausalLM, tok: AutoTokenizer, prompt: str
+) -> str:
     encoded = tok(prompt, return_tensors="pt")
     input_ids = encoded.get("input_ids")
     if input_ids is None:
@@ -1517,7 +1715,9 @@ def _generate_det_response(model: AutoModelForCausalLM, tok: AutoTokenizer, prom
             **encoded,
             max_new_tokens=IF_EVAL_MAX_NEW_TOKENS,
             generation_config=gen_cfg,
-            pad_token_id=tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id,
+            pad_token_id=tok.pad_token_id
+            if tok.pad_token_id is not None
+            else tok.eos_token_id,
             eos_token_id=tok.eos_token_id,
         )
 
@@ -1557,7 +1757,7 @@ def run_ifeval_deterministic(
 
     rows = _read_jsonl(input_data)
     print(f"[ifeval] Running full IFEval benchmark ({len(rows)} samples)")
-    
+
     # Apply additional sampling limit if configured
     rows = _sample_rows_seeded(rows, limit=IF_EVAL_SAMPLE_LIMIT, seed=seed)
     sampled_input_path = out_dir / "input_data_used.jsonl"
@@ -1594,7 +1794,7 @@ def run_ifeval_deterministic(
         [
             sys.executable,
             "-m",
-            "sampledkd.evaluations.ifeval.evaluation_main",
+            "sekd.evaluations.ifeval.evaluation_main",
             "--input_data",
             str(sampled_input_path),
             "--input_response_data",
@@ -1625,15 +1825,20 @@ def run_ifeval_deterministic(
     metrics = {"ifeval_deterministic": {"strict_accuracy": score}}
     return metrics, out_dir
 
+
 # ---------- Safety (JailbreakBench + HarmBench) ----------
-def run_jailbreakbench(model_dir: Path, tag: str, results_dir: Path, suite: str) -> Optional[Path]:
+def run_jailbreakbench(
+    model_dir: Path, tag: str, results_dir: Path, suite: str
+) -> Optional[Path]:
     if suite != "heavy":
         print("[jbb] Skipping for light suite.")
         return None
     base_url = os.getenv("JBB_BASE_URL")
     model_name = os.getenv("JBB_MODEL")
     if not which("python") or base_url is None or model_name is None:
-        print("Skipping JailbreakBench: set JBB_BASE_URL and JBB_MODEL to use an OpenAI-style endpoint.")
+        print(
+            "Skipping JailbreakBench: set JBB_BASE_URL and JBB_MODEL to use an OpenAI-style endpoint."
+        )
         return None
     out_dir = results_dir / f"jbb_{tag}"
     ensure_dir(out_dir)
@@ -1644,14 +1849,17 @@ base_url = os.environ.get("JBB_BASE_URL")
 model = os.environ.get("JBB_MODEL")
 prompts = jbb.load_default_prompts()
 evaluation = jbb.evaluate_prompts(prompts, llm_provider="litellm", base_url=base_url, model=model)
-with open("{(out_dir / 'jbb_results.json').as_posix()}", "w") as f:
+with open("{(out_dir / "jbb_results.json").as_posix()}", "w") as f:
     json.dump(evaluation, f)
 print("Wrote JBB results")
 """
     code, _ = run([sys.executable, "-c", shim])
     return out_dir if code == 0 else None
 
-def run_harmbench(model_dir: Path, tag: str, results_dir: Path, suite: str) -> Optional[Path]:
+
+def run_harmbench(
+    model_dir: Path, tag: str, results_dir: Path, suite: str
+) -> Optional[Path]:
     if suite != "heavy":
         print("[harmbench] Skipping for light suite.")
         return None
@@ -1660,7 +1868,9 @@ def run_harmbench(model_dir: Path, tag: str, results_dir: Path, suite: str) -> O
         return None
     config = os.getenv("HARMBENCH_CONFIG")
     if config is None:
-        print("Skipping HarmBench: set HARMBENCH_CONFIG to a YAML that points to your HF model.")
+        print(
+            "Skipping HarmBench: set HARMBENCH_CONFIG to a YAML that points to your HF model."
+        )
         return None
     out_dir = results_dir / f"harmbench_{tag}"
     ensure_dir(out_dir)
@@ -1715,23 +1925,35 @@ def collect_lmeval_metrics(lmeval_dir: Path) -> Dict[str, Dict[str, float]]:
             print(f"Failed to parse {p}: {e}")
     return results
 
+
 def collect_lighteval_metrics(out_file: Path) -> Dict[str, Dict[str, float]]:
     if not out_file or not out_file.exists():
         return {}
     try:
         blob = json.load(open(out_file))
         return {
-            task: {mk: float(mv) for mk, mv in task_res.items() if isinstance(mv, (int, float))}
+            task: {
+                mk: float(mv)
+                for mk, mv in task_res.items()
+                if isinstance(mv, (int, float))
+            }
             for task, task_res in blob.items()
         }
     except Exception as e:
         print(f"Failed to parse {out_file}: {e}")
     return {}
 
-def collect_evalplus_metrics(root: Optional[Path], ds_name: str) -> Dict[str, Dict[str, float]]:
+
+def collect_evalplus_metrics(
+    root: Optional[Path], ds_name: str
+) -> Dict[str, Dict[str, float]]:
     if not root or not root.exists():
         return {}
-    candidates = [p for name in ("summary.json", "report.json", "scores.json") for p in root.rglob(name)]
+    candidates = [
+        p
+        for name in ("summary.json", "report.json", "scores.json")
+        for p in root.rglob(name)
+    ]
     if not candidates:
         return {}
     p = max(candidates, key=lambda x: x.stat().st_mtime)
@@ -1739,20 +1961,30 @@ def collect_evalplus_metrics(root: Optional[Path], ds_name: str) -> Dict[str, Di
         blob = json.load(open(p))
         metrics = {
             k: float(blob[k])
-            for k in ["pass@1", "pass@5", "pass@10", "pass@100", "mbpp_score", "humaneval_score"]
+            for k in [
+                "pass@1",
+                "pass@5",
+                "pass@10",
+                "pass@100",
+                "mbpp_score",
+                "humaneval_score",
+            ]
             if isinstance(blob.get(k), (int, float))
         }
         metrics.update(
             {
                 k: float(v)
                 for k, v in blob.items()
-                if k not in metrics and isinstance(v, (int, float)) and ("pass" in k or "score" in k or "acc" in k)
+                if k not in metrics
+                and isinstance(v, (int, float))
+                and ("pass" in k or "score" in k or "acc" in k)
             }
         )
         return {ds_name: metrics}
     except Exception as e:
         print(f"Failed to parse EvalPlus summary at {p}: {e}")
     return {}
+
 
 def collect_alpacaeval_metrics(out_dir: Optional[Path]) -> Dict[str, Dict[str, float]]:
     if not out_dir or not out_dir.exists():
@@ -1763,7 +1995,12 @@ def collect_alpacaeval_metrics(out_dir: Optional[Path]) -> Dict[str, Dict[str, f
             if isinstance(blob, dict):
                 vals = {
                     k: float(blob[k])
-                    for k in ["length_controlled_win_rate", "win_rate", "pairwise_win_rate", "length_controlled"]
+                    for k in [
+                        "length_controlled_win_rate",
+                        "win_rate",
+                        "pairwise_win_rate",
+                        "length_controlled",
+                    ]
                     if isinstance(blob.get(k), (int, float))
                 }
                 if vals:
@@ -1772,7 +2009,10 @@ def collect_alpacaeval_metrics(out_dir: Optional[Path]) -> Dict[str, Dict[str, f
             continue
     return {}
 
-def collect_simple_json(root: Optional[Path], task_name: str, filename: str) -> Dict[str, Dict[str, float]]:
+
+def collect_simple_json(
+    root: Optional[Path], task_name: str, filename: str
+) -> Dict[str, Dict[str, float]]:
     if not root:
         return {}
     p = root / filename
@@ -1782,13 +2022,18 @@ def collect_simple_json(root: Optional[Path], task_name: str, filename: str) -> 
         blob = json.load(open(p))
         if isinstance(blob, dict):
             return {
-                task_name: {k: float(v) for k, v in blob.items() if isinstance(v, (int, float))}
+                task_name: {
+                    k: float(v) for k, v in blob.items() if isinstance(v, (int, float))
+                }
             }
     except Exception as e:
         print(f"Failed to parse {p}: {e}")
     return {}
 
-def merge_model_results(per_source: List[Dict[str, Dict[str, float]]]) -> Dict[str, Dict[str, float]]:
+
+def merge_model_results(
+    per_source: List[Dict[str, Dict[str, float]]],
+) -> Dict[str, Dict[str, float]]:
     merged = {}
     for src in per_source:
         for task, metrics in src.items():
@@ -1797,23 +2042,39 @@ def merge_model_results(per_source: List[Dict[str, Dict[str, float]]]) -> Dict[s
                 merged[task][mk] = mv
     return merged
 
-def print_latex_table(all_models_metrics: Dict[str, Dict[str, Dict[str, float]]]) -> None:
-    all_metrics = sorted({m for model in all_models_metrics.values() for task in model.values() for m in task.keys()})
+
+def print_latex_table(
+    all_models_metrics: Dict[str, Dict[str, Dict[str, float]]],
+) -> None:
+    all_metrics = sorted(
+        {
+            m
+            for model in all_models_metrics.values()
+            for task in model.values()
+            for m in task.keys()
+        }
+    )
     tasks = sorted({t for model in all_models_metrics.values() for t in model.keys()})
     if not all_metrics or not tasks:
-        print("\n% No metrics found — check timeouts/include_path. Skipping table.\n")
+        print("\n% No metrics found - check timeouts/include_path. Skipping table.\n")
         return
+
     def _disp_metric(m: str) -> str:
         # Clean up filter suffixes like ",none" in lm-eval keys for nicer LaTeX headers
         if "," in m:
             head, tail = m.split(",", 1)
             return head if tail == "none" else m
         return m
+
     print("\n% ---- LaTeX table (booktabs) ----")
     print(r"\begin{table}")
     print(r"\centering")
-    print(r"\caption{Evaluation across public benchmarks (same decoding params across systems).}")
-    print(r"\begin{tabular}{l" + "c" * (len(all_metrics) * len(all_models_metrics)) + r"}")
+    print(
+        r"\caption{Evaluation across public benchmarks (same decoding params across systems).}"
+    )
+    print(
+        r"\begin{tabular}{l" + "c" * (len(all_metrics) * len(all_models_metrics)) + r"}"
+    )
     print(r"\toprule")
     header = ["Task"]
     model_names = list(all_models_metrics.keys())
@@ -1840,12 +2101,14 @@ def print_latex_table(all_models_metrics: Dict[str, Dict[str, Dict[str, float]]]
     print(r"\end{tabular}")
     print(r"\end{table}")
 
+
 def save_json(obj: dict, path: Path) -> None:
     """Persist a Python dict to pretty-printed UTF-8 JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
     print(f"[json] Wrote {path}")
+
 
 DISPLAY_NAME_ENV_VARS = (
     "RUN_DISPLAY_NAME",
@@ -2023,7 +2286,9 @@ def _parse_table_line(line: str) -> Optional[List[str]]:
     return columns if columns else None
 
 
-def _normalize_row_length(row: List[str], expected_len: int, fill: str = "---") -> List[str]:
+def _normalize_row_length(
+    row: List[str], expected_len: int, fill: str = "---"
+) -> List[str]:
     if len(row) < expected_len:
         row = row + [fill] * (expected_len - len(row))
     return row[:expected_len]
@@ -2140,7 +2405,9 @@ def append_table_row(
             if parsed is not None:
                 existing_rows.append(parsed)
 
-    desired_header = _build_table_header_columns(filtered_tasks, include_avg_ece=include_avg_ece)
+    desired_header = _build_table_header_columns(
+        filtered_tasks, include_avg_ece=include_avg_ece
+    )
     existing_header = existing_rows[0] if existing_rows else []
     existing_body = existing_rows[1:] if len(existing_rows) > 1 else []
     header = desired_header
@@ -2148,15 +2415,16 @@ def append_table_row(
     expected_len = len(header)
     normalized_body: List[List[str]] = []
     if existing_body:
-        key_mapping = {
-            existing_header[idx]: idx
-            for idx in range(len(existing_header))
-        }
+        key_mapping = {existing_header[idx]: idx for idx in range(len(existing_header))}
         for row in existing_body:
             projected_row = []
             for col_name in header:
                 src_idx = key_mapping.get(col_name)
-                value = row[src_idx] if src_idx is not None and src_idx < len(row) else "---"
+                value = (
+                    row[src_idx]
+                    if src_idx is not None and src_idx < len(row)
+                    else "---"
+                )
                 projected_row.append(value)
             normalized_body.append(_normalize_row_length(projected_row, expected_len))
     else:
@@ -2225,41 +2493,75 @@ def append_table_row_csv_json(
                 projected = []
                 for col_name in header:
                     src_idx = key_mapping.get(col_name)
-                    projected.append(row[src_idx] if src_idx is not None and src_idx < len(row) else "---")
+                    projected.append(
+                        row[src_idx]
+                        if src_idx is not None and src_idx < len(row)
+                        else "---"
+                    )
                 projected_body.append(_normalize_row_length(projected, expected_len))
             all_rows = [header] + projected_body + [new_row]
         else:
-            normalized_body = [_normalize_row_length(r, expected_len) for r in existing_body]
+            normalized_body = [
+                _normalize_row_length(r, expected_len) for r in existing_body
+            ]
             all_rows = [header] + normalized_body + [new_row]
 
     _write_csv_table(csv_path, all_rows)
     json_obj = {
         "header": header,
         "rows": [
-            {header[i]: row[i] for i in range(expected_len)}
-            for row in all_rows[1:]
+            {header[i]: row[i] for i in range(expected_len)} for row in all_rows[1:]
         ],
     }
     save_json(json_obj, json_path)
+
 
 # ---------- Main pipeline ----------
 def main():
     parser = argparse.ArgumentParser()
     # Single input: trained student model path (either HF dir or .pt checkpoint). We'll auto-detect.
-    parser.add_argument("model", type=str, help="Path to trained student model: HF directory (preferred) or a .pt checkpoint. If --from_hf is set, this may be a HF hub ID (e.g., 'Qwen/Qwen3-8B').")
+    parser.add_argument(
+        "model",
+        type=str,
+        help="Path to trained student model: HF directory (preferred) or a .pt checkpoint. If --from_hf is set, this may be a HF hub ID (e.g., 'Qwen/Qwen3-8B').",
+    )
     # Parallel/GPU controls
-    parser.add_argument("--gpu_ids", type=str, default=None,
-                        help="Comma-separated physical GPU ids for parallel lm-eval (e.g., '0,1,2'). Defaults to visible GPUs.")
-    parser.add_argument("--lm_eval_share_gpu_pool", action="store_true",
-                        help="Treat provided gpu_ids as a single pool per lm-eval subprocess (tensor-parallel sharding for large models).")
-    parser.add_argument("--use-fsdp", "--use_fsdp", dest="use_fsdp", action="store_true",
-                        help="Wrap the evaluation model with PyTorch Fully Sharded Data Parallel (torch.distributed.run).")
-    parser.add_argument("--fsdp_layer_cls", type=str, default=None,
-                        help="Override the transformer layer class to wrap when using FSDP (e.g., 'Qwen3DecoderLayer').")
-    parser.add_argument("--fsdp_policy", type=str, default="full_shard auto_wrap",
-                        help="Value forwarded as fsdp=... in HF model_args when --use-fsdp is set (default: 'full_shard auto_wrap').")
-    parser.add_argument("--max_parallel", type=int, default=None,
-                        help="Cap the number of parallel lm-eval workers (<= number of provided GPUs).")
+    parser.add_argument(
+        "--gpu_ids",
+        type=str,
+        default=None,
+        help="Comma-separated physical GPU ids for parallel lm-eval (e.g., '0,1,2'). Defaults to visible GPUs.",
+    )
+    parser.add_argument(
+        "--lm_eval_share_gpu_pool",
+        action="store_true",
+        help="Treat provided gpu_ids as a single pool per lm-eval subprocess (tensor-parallel sharding for large models).",
+    )
+    parser.add_argument(
+        "--use-fsdp",
+        "--use_fsdp",
+        dest="use_fsdp",
+        action="store_true",
+        help="Wrap the evaluation model with PyTorch Fully Sharded Data Parallel (torch.distributed.run).",
+    )
+    parser.add_argument(
+        "--fsdp_layer_cls",
+        type=str,
+        default=None,
+        help="Override the transformer layer class to wrap when using FSDP (e.g., 'Qwen3DecoderLayer').",
+    )
+    parser.add_argument(
+        "--fsdp_policy",
+        type=str,
+        default="full_shard auto_wrap",
+        help="Value forwarded as fsdp=... in HF model_args when --use-fsdp is set (default: 'full_shard auto_wrap').",
+    )
+    parser.add_argument(
+        "--max_parallel",
+        type=int,
+        default=None,
+        help="Cap the number of parallel lm-eval workers (<= number of provided GPUs).",
+    )
     parser.add_argument("--work_dir", type=str, default="eval_runs")
     # Some wrappers (e.g., Slurm scripts) may accidentally emit a bare `--output_dir`
     # when a variable is empty. Accept that and fall back to the default.
@@ -2271,32 +2573,63 @@ def main():
         const="evaluation_json_results",
     )
     # Unified runs registry integration
-    parser.add_argument("--runs_registry_validation", type=str, default="results/runs_validation.json",
-                        help="Path to the validation split runs JSON registry.")
-    parser.add_argument("--runs_registry_test", type=str, default="results/runs_test.json",
-                        help="Path to the test split runs JSON registry.")
-    parser.add_argument("--params_json", type=str, default=None,
-                        help="Optional path to a JSON file containing the original training parameters. If not provided, attempts to infer from model dir (config.json).")
+    parser.add_argument(
+        "--runs_registry_validation",
+        type=str,
+        default="results/runs_validation.json",
+        help="Path to the validation split runs JSON registry.",
+    )
+    parser.add_argument(
+        "--runs_registry_test",
+        type=str,
+        default="results/runs_test.json",
+        help="Path to the test split runs JSON registry.",
+    )
+    parser.add_argument(
+        "--params_json",
+        type=str,
+        default=None,
+        help="Optional path to a JSON file containing the original training parameters. If not provided, attempts to infer from model dir (config.json).",
+    )
     # Logging configuration (default project updated per request)
-    parser.add_argument("--wandb_project", type=str, default="selective-entropy-knowledge-distillation",
-                        help="W&B project slug (e.g., 'selective-entropy-knowledge-distillation').")
-    parser.add_argument("--disable_wandb", action="store_true", help="Disable W&B logging.")
-    parser.add_argument("--disable_tensorboard", action="store_true", help="Disable TensorBoard logging.")
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default="selective-entropy-knowledge-distillation",
+        help="W&B project slug (e.g., 'selective-entropy-knowledge-distillation').",
+    )
+    parser.add_argument(
+        "--disable_wandb", action="store_true", help="Disable W&B logging."
+    )
+    parser.add_argument(
+        "--disable_tensorboard",
+        action="store_true",
+        help="Disable TensorBoard logging.",
+    )
     parser.add_argument(
         "--include_test_split",
         action="store_true",
         help="Include the test split evaluation in addition to validation.",
     )
     # Suite selection
-    parser.add_argument("--suite", type=str, choices=["light", "heavy"], default="light",
-                        help="Evaluation suite to run: 'light' (quick) or 'heavy' (paper).")
+    parser.add_argument(
+        "--suite",
+        type=str,
+        choices=["light", "heavy"],
+        default="light",
+        help="Evaluation suite to run: 'light' (quick) or 'heavy' (paper).",
+    )
     parser.add_argument(
         "--only_ifeval",
         action="store_true",
         help="Run only deterministic IF-Eval (strict, test-only) and skip all other benchmarks.",
     )
     # Source override: treat positional model arg as HF hub ID
-    parser.add_argument("--from_hf", action="store_true", help="Interpret 'model' as a HF hub ID even if it is not a local path.")
+    parser.add_argument(
+        "--from_hf",
+        action="store_true",
+        help="Interpret 'model' as a HF hub ID even if it is not a local path.",
+    )
     # LM-Eval batching controls
     parser.add_argument(
         "--lm_eval_batch_size",
@@ -2354,9 +2687,11 @@ def main():
     args = parser.parse_args()
 
     if args.lm_eval_load_in_8bit and args.lm_eval_load_in_4bit:
-        print("Error: --lm_eval_load_in_8bit and --lm_eval_load_in_4bit are mutually exclusive.")
+        print(
+            "Error: --lm_eval_load_in_8bit and --lm_eval_load_in_4bit are mutually exclusive."
+        )
         sys.exit(2)
-    
+
     # Print all CLI parameters at startup
     print("=" * 80)
     print("EVALUATION CONFIGURATION")
@@ -2385,9 +2720,14 @@ def main():
     default_test_registry = Path("results/runs_test.json")
     default_validation_registry = Path("results/runs_validation.json")
     runs_registry_test = Path(args.runs_registry_test or default_test_registry)
-    runs_registry_validation = Path(args.runs_registry_validation or default_validation_registry)
+    runs_registry_validation = Path(
+        args.runs_registry_validation or default_validation_registry
+    )
 
-    if runs_registry_validation == default_validation_registry and runs_registry_test != default_test_registry:
+    if (
+        runs_registry_validation == default_validation_registry
+        and runs_registry_test != default_test_registry
+    ):
         runs_registry_validation = runs_registry_test.with_name("runs_validation.json")
 
     args.include_test_split = True  # always evaluate both validation and test splits
@@ -2437,9 +2777,15 @@ def main():
     if args.max_parallel is not None and args.max_parallel > 0:
         gpu_pool = gpu_pool[: args.max_parallel]
     if args.lm_eval_share_gpu_pool and len(gpu_pool) < 2:
-        print("[gpu] Warning: --lm_eval_share_gpu_pool requested but fewer than 2 GPUs available; running without sharding.")
+        print(
+            "[gpu] Warning: --lm_eval_share_gpu_pool requested but fewer than 2 GPUs available; running without sharding."
+        )
         args.lm_eval_share_gpu_pool = False
-    print(f"[gpu] Using GPUs: {gpu_pool}" if gpu_pool else "[gpu] No GPUs detected/selected.")
+    print(
+        f"[gpu] Using GPUs: {gpu_pool}"
+        if gpu_pool
+        else "[gpu] No GPUs detected/selected."
+    )
 
     # Resolve the single model dir to evaluate
     model_specs: List[Tuple[str, Path]] = []
@@ -2473,16 +2819,26 @@ def main():
             except Exception as e:
                 print(f"Error loading checkpoint {in_path}: {e}")
                 sys.exit(2)
-            base_model_dir = chk.get("base_model_dir") or chk.get("base_model") or chk.get("student_model")
+            base_model_dir = (
+                chk.get("base_model_dir")
+                or chk.get("base_model")
+                or chk.get("student_model")
+            )
             if not base_model_dir:
-                print("Error: checkpoint does not record base_model_dir. Re-train with newer code or evaluate a ready HF model directory.")
+                print(
+                    "Error: checkpoint does not record base_model_dir. Re-train with newer code or evaluate a ready HF model directory."
+                )
                 sys.exit(2)
             export_dir = exports_dir / f"export_{in_path.stem}"
-            print(f"[export] Exporting HF model from base='{base_model_dir}' and ckpt='{in_path.name}' -> '{export_dir}'")
+            print(
+                f"[export] Exporting HF model from base='{base_model_dir}' and ckpt='{in_path.name}' -> '{export_dir}'"
+            )
             export_hf_model(base_model_dir, in_path, export_dir)
             model_specs.append((tag, export_dir))
         else:
-            print(f"Error: provided model path is neither an HF directory nor a .pt file: {in_path}")
+            print(
+                f"Error: provided model path is neither an HF directory nor a .pt file: {in_path}"
+            )
             sys.exit(2)
     if not model_specs:
         print("No models exported. Exiting.")
@@ -2496,7 +2852,9 @@ def main():
     if args.use_fsdp and fsdp_layer_cls and not args.fsdp_layer_cls:
         args.fsdp_layer_cls = fsdp_layer_cls
     if args.use_fsdp and not fsdp_layer_cls:
-        print("[fsdp] Warning: unable to identify a transformer layer class; wrapping the full model may be slower.")
+        print(
+            "[fsdp] Warning: unable to identify a transformer layer class; wrapping the full model may be slower."
+        )
 
     metrics_by_phase: Dict[str, Dict[str, Dict[str, float]]] = {
         phase["name"]: {} for phase in evaluation_phases
@@ -2508,7 +2866,9 @@ def main():
             phase_name = phase["name"]
             phase_registry_path = Path(phase["registry_path"])
             phase_tag = f"{tag}-{phase_name}"
-            print(f"\n=== Running benchmarks for {tag} (suite={args.suite}, split={phase_name}) ===")
+            print(
+                f"\n=== Running benchmarks for {tag} (suite={args.suite}, split={phase_name}) ==="
+            )
             phase_start = time.time()
 
             phase_results_dir = results_dir / phase_name
@@ -2555,20 +2915,36 @@ def main():
                     task_split_overrides=phase["split_overrides"],
                 )
                 lmeval_wall = time.time() - lmeval_start
-                lmeval_metrics = collect_lmeval_metrics(lmeval_root) if lmeval_root else {}
-                raw_ece_metrics = collect_ece_from_lmeval_samples(lmeval_root) if lmeval_root else {}
-                ece_metrics = _map_ece_to_existing_tasks(raw_ece_metrics, lmeval_metrics)
+                lmeval_metrics = (
+                    collect_lmeval_metrics(lmeval_root) if lmeval_root else {}
+                )
+                raw_ece_metrics = (
+                    collect_ece_from_lmeval_samples(lmeval_root) if lmeval_root else {}
+                )
+                ece_metrics = _map_ece_to_existing_tasks(
+                    raw_ece_metrics, lmeval_metrics
+                )
 
                 lighteval_start = time.time()
-                lighteval_file = run_lighteval(model_dir, phase_tag, phase_results_dir, suite=args.suite)
-                lighteval_wall = time.time() - lighteval_start if lighteval_file else 0.0
+                lighteval_file = run_lighteval(
+                    model_dir, phase_tag, phase_results_dir, suite=args.suite
+                )
+                lighteval_wall = (
+                    time.time() - lighteval_start if lighteval_file else 0.0
+                )
                 lighteval_metrics = collect_lighteval_metrics(lighteval_file)
 
                 evalplus_start = time.time()
-                evalplus_roots = run_evalplus(model_dir, phase_tag, ["humaneval", "mbpp"], suite=args.suite)
+                evalplus_roots = run_evalplus(
+                    model_dir, phase_tag, ["humaneval", "mbpp"], suite=args.suite
+                )
                 evalplus_wall = time.time() - evalplus_start if evalplus_roots else 0.0
-                he_metrics = collect_evalplus_metrics(evalplus_roots.get("humaneval"), "HumanEval+")
-                mbpp_metrics = collect_evalplus_metrics(evalplus_roots.get("mbpp"), "MBPP+")
+                he_metrics = collect_evalplus_metrics(
+                    evalplus_roots.get("humaneval"), "HumanEval+"
+                )
+                mbpp_metrics = collect_evalplus_metrics(
+                    evalplus_roots.get("mbpp"), "MBPP+"
+                )
 
             if args.only_ifeval or phase.get("ifeval_only"):
                 alpaca_wall = 0.0
@@ -2579,19 +2955,29 @@ def main():
                 hb_metrics = {}
             else:
                 alpaca_start = time.time()
-                alpaca_dir = run_alpacaeval(model_dir, phase_tag, phase_results_dir, suite=args.suite)
+                alpaca_dir = run_alpacaeval(
+                    model_dir, phase_tag, phase_results_dir, suite=args.suite
+                )
                 alpaca_wall = time.time() - alpaca_start if alpaca_dir else 0.0
                 alpaca_metrics = collect_alpacaeval_metrics(alpaca_dir)
 
                 jbb_start = time.time()
-                jbb_dir = run_jailbreakbench(model_dir, phase_tag, phase_results_dir, suite=args.suite)
+                jbb_dir = run_jailbreakbench(
+                    model_dir, phase_tag, phase_results_dir, suite=args.suite
+                )
                 jbb_wall = time.time() - jbb_start if jbb_dir else 0.0
-                jbb_metrics = collect_simple_json(jbb_dir, "JailbreakBench", "jbb_results.json")
+                jbb_metrics = collect_simple_json(
+                    jbb_dir, "JailbreakBench", "jbb_results.json"
+                )
 
                 hb_start = time.time()
-                hb_dir = run_harmbench(model_dir, phase_tag, phase_results_dir, suite=args.suite)
+                hb_dir = run_harmbench(
+                    model_dir, phase_tag, phase_results_dir, suite=args.suite
+                )
                 hb_wall = time.time() - hb_start if hb_dir else 0.0
-                hb_metrics = collect_simple_json(hb_dir, "HarmBench", "harmbench_results.json")
+                hb_metrics = collect_simple_json(
+                    hb_dir, "HarmBench", "harmbench_results.json"
+                )
 
             # Run deterministic IF-Eval (with proper validation/test splits)
             ifeval_det_metrics: Dict[str, Dict[str, float]] = {}
@@ -2609,17 +2995,19 @@ def main():
             )
             ifeval_det_wall = time.time() - ifeval_start
 
-            merged = merge_model_results([
-                lmeval_metrics,
-                ece_metrics,
-                lighteval_metrics,
-                he_metrics,
-                mbpp_metrics,
-                ifeval_det_metrics,
-                alpaca_metrics,
-                jbb_metrics,
-                hb_metrics,
-            ])
+            merged = merge_model_results(
+                [
+                    lmeval_metrics,
+                    ece_metrics,
+                    lighteval_metrics,
+                    he_metrics,
+                    mbpp_metrics,
+                    ifeval_det_metrics,
+                    alpaca_metrics,
+                    jbb_metrics,
+                    hb_metrics,
+                ]
+            )
             metrics_by_phase[phase_name][tag] = merged
 
             total_wall = time.time() - phase_start
@@ -2635,7 +3023,9 @@ def main():
             print(f"overall wall ({phase_name}): {total_wall:.1f}s")
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            json_result_file = phase_json_dir / f"eval_{phase_name}_{args.suite}_{tag}_{ts}.json"
+            json_result_file = (
+                phase_json_dir / f"eval_{phase_name}_{args.suite}_{tag}_{ts}.json"
+            )
             averages = compute_averages(merged)
             method_label = model_display_name or tag
 
@@ -2662,7 +3052,9 @@ def main():
             if avg_ece_val is None and ece_values:
                 avg_ece_val = sum(ece_values) / len(ece_values)
 
-            avg_ppl_val = averages.get("avg_perplexity,none") or averages.get("avg_perplexity")
+            avg_ppl_val = averages.get("avg_perplexity,none") or averages.get(
+                "avg_perplexity"
+            )
             if avg_ppl_val is None and perplexity_values:
                 avg_ppl_val = sum(perplexity_values) / len(perplexity_values)
 
@@ -2674,12 +3066,16 @@ def main():
             }
 
             if avg_ece_val is not None:
-                print(f"\n[ECE Summary] ({phase_name}) Average ECE across {len(ece_values)} tasks: {avg_ece_val:.4f}")
+                print(
+                    f"\n[ECE Summary] ({phase_name}) Average ECE across {len(ece_values)} tasks: {avg_ece_val:.4f}"
+                )
                 for task, ece in per_task_ece.items():
                     print(f"  {task}: {ece:.4f}")
 
             if avg_ppl_val is not None:
-                print(f"\n[Perplexity Summary] ({phase_name}) Average perplexity across {len(perplexity_values)} tasks: {avg_ppl_val:.2f}")
+                print(
+                    f"\n[Perplexity Summary] ({phase_name}) Average perplexity across {len(perplexity_values)} tasks: {avg_ppl_val:.2f}"
+                )
                 for task, ppl in per_task_perplexity.items():
                     print(f"  {task}: {ppl:.2f}")
 
@@ -2741,7 +3137,10 @@ def main():
                             if isinstance(rp_blob, dict):
                                 params_blob = rp_blob.get("params") or rp_blob
                                 name_candidate = rp_blob.get("display_name")
-                                if isinstance(name_candidate, str) and name_candidate.strip():
+                                if (
+                                    isinstance(name_candidate, str)
+                                    and name_candidate.strip()
+                                ):
                                     model_display_name = name_candidate.strip()
                                 if isinstance(rp_blob.get("id"), str):
                                     params_hash = rp_blob["id"]
@@ -2765,16 +3164,51 @@ def main():
                             cfg_blob = json.load(open(cfg_path))
                             probable = {}
                             for k in [
-                                "teacher_model", "student_model", "distill_type", "k_percent",
-                                "enable_ce", "alpha_ce", "kd_temperature", "entropy_approx_temperature",
-                                "anneal_kd_temperature", "kd_temperature_start", "kd_temperature_end", "kd_hold_frac",
-                                "rs_alpha", "rs_floor", "bucket_lower_percent", "bucket_upper_percent",
-                                "score_token_selection", "score_normalize", "score_entropy_weight", "score_ce_weight", "score_kl_weight",
-                                "bandit_alpha", "bandit_lambda", "bandit_threshold", "bandit_min_tokens", "bandit_max_tokens", "bandit_device", "bandit_reward_clip",
-                                "datasets", "prompt_col", "answer_col", "dataset_config", "fineweb_tokens",
-                                "epochs", "batch_size", "gradient_accumulation_steps", "max_seq_len", "lr",
-                                "seed", "deterministic",
-                                "offline_cache", "entropy_approx_m", "rs_vocab_samples", "rs_vocab_beta", "H_hat_u8",
+                                "teacher_model",
+                                "student_model",
+                                "distill_type",
+                                "k_percent",
+                                "enable_ce",
+                                "alpha_ce",
+                                "kd_temperature",
+                                "entropy_approx_temperature",
+                                "anneal_kd_temperature",
+                                "kd_temperature_start",
+                                "kd_temperature_end",
+                                "kd_hold_frac",
+                                "rs_alpha",
+                                "rs_floor",
+                                "bucket_lower_percent",
+                                "bucket_upper_percent",
+                                "score_token_selection",
+                                "score_normalize",
+                                "score_entropy_weight",
+                                "score_ce_weight",
+                                "score_kl_weight",
+                                "bandit_alpha",
+                                "bandit_lambda",
+                                "bandit_threshold",
+                                "bandit_min_tokens",
+                                "bandit_max_tokens",
+                                "bandit_device",
+                                "bandit_reward_clip",
+                                "datasets",
+                                "prompt_col",
+                                "answer_col",
+                                "dataset_config",
+                                "fineweb_tokens",
+                                "epochs",
+                                "batch_size",
+                                "gradient_accumulation_steps",
+                                "max_seq_len",
+                                "lr",
+                                "seed",
+                                "deterministic",
+                                "offline_cache",
+                                "entropy_approx_m",
+                                "rs_vocab_samples",
+                                "rs_vocab_beta",
+                                "H_hat_u8",
                             ]:
                                 if k in cfg_blob:
                                     probable[k] = cfg_blob[k]
@@ -2799,14 +3233,20 @@ def main():
             except StopIteration:
                 pass
             except Exception as e:
-                print(f"[registry] Failed to upsert eval results at {phase_registry_path}: {e}")
+                print(
+                    f"[registry] Failed to upsert eval results at {phase_registry_path}: {e}"
+                )
 
             if args.suite == "light" and not args.only_ifeval:
                 table_path = phase_registry_path.with_name(f"table_{phase_name}.txt")
-                append_table_row(table_path, method_label, LIGHT_LMEVAL_TASKS, merged, averages)
+                append_table_row(
+                    table_path, method_label, LIGHT_LMEVAL_TASKS, merged, averages
+                )
             if phase_name == "test" and ifeval_det_metrics:
                 if_csv_path = phase_registry_path.with_name("if_table_determi_test.csv")
-                if_json_path = phase_registry_path.with_name("if_table_determi_test.json")
+                if_json_path = phase_registry_path.with_name(
+                    "if_table_determi_test.json"
+                )
                 append_table_row_csv_json(
                     csv_path=if_csv_path,
                     json_path=if_json_path,
@@ -2829,7 +3269,9 @@ def main():
                             config={
                                 "suite": args.suite,
                                 "split": phase_name,
-                                "model": str(base_model_dir) if base_model_dir else str(model_dir),
+                                "model": str(base_model_dir)
+                                if base_model_dir
+                                else str(model_dir),
                             },
                             tags=["evaluation", args.suite, phase_name],
                             group=os.getenv("WANDB_GROUP"),
@@ -2853,11 +3295,15 @@ def main():
                             phase_run.log(flat)
                             phase_run.finish()
                         else:
-                            log_evaluation_to_wandb(phase_tag, merged, args.wandb_project)
+                            log_evaluation_to_wandb(
+                                phase_tag, merged, args.wandb_project
+                            )
                     else:
                         log_evaluation_to_wandb(phase_tag, merged, args.wandb_project)
                 if not args.disable_tensorboard:
-                    log_evaluation_to_tensorboard(phase_tag, merged, str(work_dir / "tb_logs"))
+                    log_evaluation_to_tensorboard(
+                        phase_tag, merged, str(work_dir / "tb_logs")
+                    )
             except Exception as e:
                 print(f"Error logging {phase_tag} metrics: {e}")
 
@@ -2865,6 +3311,7 @@ def main():
         phase_name = phase["name"]
         print(f"\n=== Summary table ({phase_name}) ===")
         print_latex_table(metrics_by_phase[phase_name])
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,5 @@
-"""Compatibility shim for legacy imports of `sampledkd.training.distiller`."""
+"""Compatibility shim for legacy imports of `sekd.training.distiller`."""
 
-from sampledkd.distill.trainer import Distiller
+from sekd.distill.trainer import Distiller
 
 __all__ = ["Distiller"]

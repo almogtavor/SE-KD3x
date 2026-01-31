@@ -10,9 +10,17 @@ Three config flags control the selective lm_head flow:
 | `student_selective_lm_head` | Student lm_head with grad on N_sel positions only (avoids `[B,L,V_student]` forward+backward) |
 | `selective_lm_head_same_flow` | Force the selective flow even when both selective flags are false (useful for same-flow baselines) |
 
-**Important**: This flow is **incompatible with `offline_cache=True`** — it requires an online teacher forward pass. Set `NO_OFFLINE=1` when using selective lm_head.
+## Offline Cache Compatibility
+
+This flow is **fully compatible with `offline_cache=True`**. When using offline cache:
+
+- **Position selection** uses cached teacher entropy instead of computing student entropy online
+- **Teacher logits** come from cached RS-KD samples (no teacher forward pass needed)
+- This enables teacher-free training with selective lm_head memory optimizations
 
 ## Flow (when enabled)
+
+### With Online Teacher (`offline_cache=False`)
 
 1. **Student base transformer** (`student.model`) runs with grad on all positions → `[B, T, D_student]` hidden states.
 2. **Student entropy** is computed via **chunked streaming** (default `chunk_size=128`) under `torch.no_grad()`. Only scalar entropy per position is stored; logits are discarded per chunk.
@@ -24,6 +32,15 @@ Three config flags control the selective lm_head flow:
    - If `teacher_selective_lm_head=True`: base transformer runs on all positions, lm_head only on selected → `[N_sel, V_teacher]`
    - Otherwise: full forward, then indexed to selected → `[N_sel, V_teacher]`
 6. **KD loss** is computed on the N_sel positions using `F.kl_div(log_target=True)` for memory efficiency.
+
+### With Offline Cache (`offline_cache=True`)
+
+1. **Student base transformer** runs with grad on all positions → `[B, T, D_student]` hidden states.
+2. **Cached teacher entropy** is loaded from the offline cache (no online computation needed).
+3. **Top-k% positions** are selected by highest cached entropy.
+4. **Student lm_head** runs on selected positions only → `[N_sel, V_student]`.
+5. **Cached RS-KD samples** provide teacher distribution for selected positions (no teacher forward).
+6. **KD loss** uses the sampled teacher distribution: `loss = -sum(p_t * log_p_s)` on selected positions.
 7. **CE loss** (if `alpha_ce > 0`):
    - If `enable_ce_on_all_tokens=True`: requires full student logits (computed separately if using selective student)
    - Otherwise: CE computed on selected positions only
@@ -46,26 +63,33 @@ Qwen3-8B teacher → Qwen3-1.7B student, B=2, T=2048, RTX 3090 (24GB each):
 | Full KD (k=100%) | 16.7 GB | 10.6 GB | baseline |
 | Selective (k=20%) | 16.7 GB | 7.8 GB | ~26% faster |
 
-Student savings at k=20%: **2.8 GB (−26%)** — transient lm_head allocations eliminated.
+Student savings at k=20%: **2.8 GB (−26%)** - transient lm_head allocations eliminated.
 
 ## Configuration
 
 ```bash
-# Both selective (max memory savings)
+# Both selective with online teacher (max memory savings)
 TEACHER_SELECTIVE_LM_HEAD=1 \
 STUDENT_SELECTIVE_LM_HEAD=1 \
 TOPK_TOK_SELECTION_METRIC=student_entropy \
 NORMALIZE_TOPK_BY_LENGTH=1 \
 K_PERCENT=20 \
 ALPHA_CE=0.0 \
-NO_OFFLINE=1 \
 LOG_PEAK_MEMORY=1 \
   sbatch train.slurm top-k-tok 20 light mytag
+
+# Selective with offline cache (no teacher required during training)
+STUDENT_SELECTIVE_LM_HEAD=1 \
+OFFLINE_CACHE=1 \
+NORMALIZE_TOPK_BY_LENGTH=1 \
+K_PERCENT=20 \
+ALPHA_CE=0.0 \
+LOG_PEAK_MEMORY=1 \
+  sbatch train.slurm top-k-tok 20 light mytag-cached
 
 # Same-flow baseline (identical code path, no actual selection savings)
 SELECTIVE_LM_HEAD_SAME_FLOW=1 \
 K_PERCENT=100 \
-NO_OFFLINE=1 \
   sbatch train.slurm top-k-tok 100 light baseline
 ```
 
@@ -78,7 +102,7 @@ NO_OFFLINE=1 \
 | `SELECTIVE_LM_HEAD_SAME_FLOW` | `selective_lm_head_same_flow` | Force selective flow without actual savings |
 | `ENTROPY_STREAMING_CHUNK_SIZE` | `entropy_streaming_chunk_size` | Chunk size for streaming entropy (default 128) |
 | `LOG_PEAK_MEMORY` | `log_peak_memory` | Log peak GPU memory per step |
-| `NO_OFFLINE` | Sets `offline_cache=False` | Required for selective lm_head |
+| `OFFLINE_CACHE` | `offline_cache` | Use cached teacher entropy/RS-KD samples (compatible with selective lm_head) |
 
 ## Files
 
@@ -91,10 +115,10 @@ NO_OFFLINE=1 \
 
 ### Key Functions in `selective_lm_head.py`
 
-- `_streaming_entropy_from_hidden_states()` — Chunked entropy computation
-- `compute_student_entropy_and_select()` — Select top-k% by student entropy
-- `selective_student_logits()` — Apply lm_head with grad on selected positions
-- `selective_teacher_logits()` — Run teacher base + selective lm_head
+- `_streaming_entropy_from_hidden_states()` - Chunked entropy computation
+- `compute_student_entropy_and_select()` - Select top-k% by student entropy
+- `selective_student_logits()` - Apply lm_head with grad on selected positions
+- `selective_teacher_logits()` - Run teacher base + selective lm_head
 
 ## Measuring Memory
 
@@ -141,7 +165,7 @@ kd_loss = F.kl_div(s_log_probs, t_log_probs, log_target=True, reduction='batchme
 
 ### Why Student Peak is Same Regardless of `sel_teacher`
 
-When `student_selective_lm_head=True`, PyTorch's autograd only tracks the indexed slice `s_logits_for_kd` (shape `[N_sel, V]`). Even if the teacher is run non-selectively (full `[B,L,V_teacher]`), this doesn't affect the student's backward pass or memory usage — the teacher logits are on a different device and used only under `torch.no_grad()`.
+When `student_selective_lm_head=True`, PyTorch's autograd only tracks the indexed slice `s_logits_for_kd` (shape `[N_sel, V]`). Even if the teacher is run non-selectively (full `[B,L,V_teacher]`), this doesn't affect the student's backward pass or memory usage - the teacher logits are on a different device and used only under `torch.no_grad()`.
 
 ### Contiguous Selection Optimization
 

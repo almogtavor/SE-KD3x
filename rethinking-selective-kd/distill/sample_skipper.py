@@ -1,15 +1,41 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+
+
+def _compute_sample_selection_signature(
+    config,
+    dataset_len: int,
+    strategy: str,
+) -> Dict[str, Any]:
+    """Compute a signature for sample selection to enable caching."""
+    return {
+        "strategy": strategy,
+        "l_percent": float(getattr(config, "l_percent_samples_to_keep", 20.0)),
+        "dataset_len": dataset_len,
+        "seed": int(getattr(config, "seed", 1337)),
+        "student_model": str(getattr(config, "student_model", "unknown")),
+        "teacher_model": str(getattr(config, "teacher_model", "")),
+        "kd_temperature": float(getattr(config, "kd_temperature", 1.0)),
+        "kd_objective": str(getattr(config, "kd_objective", "forward")),
+    }
+
+
+def _signature_hash(sig: Dict[str, Any]) -> str:
+    """Compute hash of signature for cache key."""
+    b = json.dumps(sig, sort_keys=True).encode("utf-8")
+    return hashlib.sha1(b).hexdigest()[:16]
+
 
 class FrozenStudentSampleSkipper:
     """Gate distillation to a fixed subset of documents based on a frozen pre-pass.
@@ -20,7 +46,7 @@ class FrozenStudentSampleSkipper:
     - ce_ratio: mean token CE_s / (CE_t + eps) between frozen student/teacher per document
     - random: deterministic random subset (no forward pass)
 
-    This matches the behavior described by SKIP_SAMPLES_BY_STUDENT + L_PERCENT_SAMPLES_TO_KEEP:
+    This matches the behavior described by skip_by_frozen_student + l_percent_samples_to_keep:
     - Collect a length-N list of per-document scores (N documents processed)
     - Select top-l% (or random l%)
     - Train using that selection mask (implemented as batch filtering)
@@ -35,6 +61,7 @@ class FrozenStudentSampleSkipper:
         dataloader,
         teacher=None,
         teacher_device: Optional[torch.device] = None,
+        offline_cache=None,
     ) -> None:
         self.config = config
         self.student = student
@@ -42,8 +69,9 @@ class FrozenStudentSampleSkipper:
         self.dataloader = dataloader
         self.teacher = teacher
         self.teacher_device = teacher_device
+        self.offline_cache = offline_cache
         # Selected doc ids (top entropy) that we keep for distillation.
-        self.selected_sample_ids: Optional[set[int]] = None
+        self.selected_sample_ids: Optional[Set[int]] = None
         # Optional debugging/inspection buffers (only populated when enabled).
         self.entropy_by_sample_id: Optional[Dict[int, float]] = None
         self.entropy_list: Optional[List[float]] = None
@@ -54,6 +82,89 @@ class FrozenStudentSampleSkipper:
         self.prepass_tokens: int = 0
         self.prepass_strategy: Optional[str] = None
         self.prepass_selected_ids: Optional[List[int]] = None
+        # Cache hit tracking
+        self._loaded_from_cache: bool = False
+
+    def _get_cache_key(self, strategy: str) -> str:
+        """Get cache key for sample selection indices."""
+        try:
+            dataset_len = len(self.dataloader.dataset)
+        except Exception:
+            dataset_len = -1
+        sig = _compute_sample_selection_signature(self.config, dataset_len, strategy)
+        return f"sample_selection_{_signature_hash(sig)}"
+
+    def _try_load_from_cache(self, strategy: str, rank_is_zero: bool) -> Optional[Set[int]]:
+        """Try to load sample selection indices from offline cache.
+
+        Returns:
+            Set of selected sample IDs if found in cache, None otherwise.
+        """
+        if self.offline_cache is None:
+            return None
+
+        cache_key = self._get_cache_key(strategy)
+        manifest = getattr(self.offline_cache, "manifest", {})
+        sample_selections = manifest.get("sample_selections", {})
+
+        if cache_key not in sample_selections:
+            return None
+
+        cached = sample_selections[cache_key]
+        cached_indices = cached.get("indices", [])
+
+        if not cached_indices:
+            return None
+
+        selected_ids = set(int(x) for x in cached_indices)
+
+        if rank_is_zero:
+            print(
+                f"[skip] Loaded {len(selected_ids)} sample selection indices from cache "
+                f"(strategy={strategy}, key={cache_key}).",
+                flush=True,
+            )
+
+        self._loaded_from_cache = True
+        return selected_ids
+
+    def _save_to_cache(self, strategy: str, selected_ids: Set[int], rank_is_zero: bool) -> None:
+        """Save sample selection indices to offline cache."""
+        if self.offline_cache is None:
+            return
+        if not selected_ids:
+            return
+
+        cache_key = self._get_cache_key(strategy)
+
+        try:
+            dataset_len = len(self.dataloader.dataset)
+        except Exception:
+            dataset_len = -1
+
+        sig = _compute_sample_selection_signature(self.config, dataset_len, strategy)
+
+        manifest = getattr(self.offline_cache, "manifest", {})
+        if "sample_selections" not in manifest:
+            manifest["sample_selections"] = {}
+
+        manifest["sample_selections"][cache_key] = {
+            "signature": sig,
+            "indices": sorted(selected_ids),
+            "count": len(selected_ids),
+        }
+
+        # Persist manifest
+        save_fn = getattr(self.offline_cache, "save_manifest", None)
+        if callable(save_fn):
+            save_fn(force=True)
+
+        if rank_is_zero:
+            print(
+                f"[skip] Saved {len(selected_ids)} sample selection indices to cache "
+                f"(strategy={strategy}, key={cache_key}).",
+                flush=True,
+            )
 
     @property
     def enabled(self) -> bool:
@@ -61,7 +172,7 @@ class FrozenStudentSampleSkipper:
 
     @property
     def l_percent(self) -> float:
-        value = float(getattr(self.config, "L_PERCENT_SAMPLES_TO_KEEP", 20.0))
+        value = float(getattr(self.config, "l_percent_samples_to_keep", 20.0))
         return max(0.0, min(100.0, value))
 
     def prepare(self, *, rank_is_zero: bool = True) -> None:
@@ -75,6 +186,7 @@ class FrozenStudentSampleSkipper:
             self.prepass_tokens = 0
             self.prepass_strategy = None
             self.prepass_selected_ids = None
+            self._loaded_from_cache = False
             return
 
         l_percent = self.l_percent
@@ -88,7 +200,27 @@ class FrozenStudentSampleSkipper:
             self.prepass_tokens = 0
             self.prepass_strategy = None
             self.prepass_selected_ids = None
+            self._loaded_from_cache = False
             return
+
+        strategy = str(getattr(self.config, "skip_samples_strategy", "entropy")).strip().lower()
+        if strategy not in {"entropy", "random", "kl", "ce_ratio"}:
+            strategy = "entropy"
+
+        # Try to load from cache first (skips frozen student forward pass)
+        cached_ids = self._try_load_from_cache(strategy, rank_is_zero)
+        if cached_ids is not None:
+            self.selected_sample_ids = cached_ids
+            self.entropy_by_sample_id = None
+            self.entropy_list = None
+            self.selection_mask_list = None
+            self.prepass_forward_s = 0.0
+            self.prepass_total_s = 0.0
+            self.prepass_tokens = 0
+            self.prepass_strategy = strategy
+            self.prepass_selected_ids = sorted(cached_ids)
+            return
+
         try:
             dl_for_scoring = DataLoader(
                 self.dataloader.dataset,
@@ -101,10 +233,6 @@ class FrozenStudentSampleSkipper:
             )
         except Exception:
             dl_for_scoring = self.dataloader
-
-        strategy = str(getattr(self.config, "skip_samples_strategy", "entropy")).strip().lower()
-        if strategy not in {"entropy", "random", "kl", "ce_ratio"}:
-            strategy = "entropy"
 
         # Random selection: choose a deterministic random subset of sample_ids.
         # This intentionally does NOT run a frozen-student forward pass.
@@ -162,6 +290,9 @@ class FrozenStudentSampleSkipper:
 
             self.selected_sample_ids = selected_ids if selected_ids else None
             self._maybe_log_selected_indices(rank_is_zero=rank_is_zero)
+            # Save to cache for future runs
+            if selected_ids:
+                self._save_to_cache(strategy, selected_ids, rank_is_zero)
             return
 
         if strategy in {"kl", "ce_ratio"} and self.teacher is None:
@@ -377,6 +508,9 @@ class FrozenStudentSampleSkipper:
         self.prepass_strategy = strategy
         self.prepass_selected_ids = sorted(selected_ids) if selected_ids else None
         self._maybe_log_selected_indices(rank_is_zero=rank_is_zero)
+        # Save to cache for future runs
+        if selected_ids:
+            self._save_to_cache(strategy, selected_ids, rank_is_zero)
 
     def _maybe_log_selected_indices(self, *, rank_is_zero: bool) -> None:
         if not rank_is_zero:

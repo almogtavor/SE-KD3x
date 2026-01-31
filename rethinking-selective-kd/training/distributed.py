@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from sampledkd.config import TrainingConfig
+from sekd.config import TrainingConfig
 
 
 @dataclass

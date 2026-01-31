@@ -29,7 +29,7 @@ except ImportError:
 
     if TYPE_CHECKING:
         # For type checkers/linting only; avoids runtime import cycles
-        from sampledkd.config import TrainingConfig
+        from sekd.config import TrainingConfig
 
 
 WandbResumeSetting = Literal["allow", "never", "must", "auto"]

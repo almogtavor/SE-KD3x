@@ -205,4 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project-specific
 temp/
+results/
+checkpoints/
+*.ckpt
+*.pt
+logits_caches/
+wandb/
+tb/
+*.csv
+runs_*.json
+
+# Large files
+*.bin
+*.safetensors
+
+# IDE
+.idea/
+.vscode/

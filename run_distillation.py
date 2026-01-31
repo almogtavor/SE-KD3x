@@ -17,8 +17,8 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 from transformers.utils.hub import cached_file
 
-from sampledkd.config import TrainingConfig
-from sampledkd.run_registry import (
+from sekd.config import TrainingConfig
+from sekd.run_registry import (
     compute_params_hash,
     upsert_run_start,
     mark_trained,
@@ -26,13 +26,21 @@ from sampledkd.run_registry import (
     normalize_params,
     get_entry,
 )
-from sampledkd.data.dataset import AIMEJsonl, DistillCollator, PackedTokenDataset, PromptDataset
-from sampledkd.models.loader import load_model
-from sampledkd.distill import Distiller
-from sampledkd.distill.trainer import TrainingTimeLimitReached
-from sampledkd.distill._mixins.amp_oom import AmpOomMixin
-from sampledkd.training.entrypoint_utils import load_teacher_with_fallback, load_fineweb_subset
-from sampledkd.training.distributed import (
+from sekd.data.dataset import (
+    AIMEJsonl,
+    DistillCollator,
+    PackedTokenDataset,
+    PromptDataset,
+)
+from sekd.models.loader import load_model
+from sekd.distill import Distiller
+from sekd.distill.trainer import TrainingTimeLimitReached
+from sekd.distill._mixins.amp_oom import AmpOomMixin
+from sekd.training.entrypoint_utils import (
+    load_teacher_with_fallback,
+    load_fineweb_subset,
+)
+from sekd.training.distributed import (
     create_distributed_sampler,
     distributed_barrier,
     distributed_broadcast_object_list,
@@ -40,7 +48,7 @@ from sampledkd.training.distributed import (
     is_rank0,
     setup_distributed_context,
 )
-from sampledkd.training.offline_cache import (
+from sekd.training.offline_cache import (
     CacheBuildResult,
     CachePlan,
     execute_cache_plan,
@@ -67,7 +75,10 @@ def _visible_gpu_count() -> int:
 
 def _run_offline_cache_torchrun(config: TrainingConfig) -> None:
     repo_root = Path(__file__).resolve().parent
-    output_dir = Path(getattr(config, "output_dir", repo_root / "results")) / "offline_cache_build"
+    output_dir = (
+        Path(getattr(config, "output_dir", repo_root / "results"))
+        / "offline_cache_build"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
@@ -151,8 +162,9 @@ def _format_alpha_ce_suffix(alpha: float) -> str:
 
 # Import logging utils with fallback
 try:
-    from sampledkd.logging.wandb_utils import create_training_combined_logger
+    from sekd.logging.wandb_utils import create_training_combined_logger
 except ImportError:
+
     def create_training_combined_logger(*args, **kwargs):
         return None
 
@@ -216,30 +228,45 @@ def parse_args_to_config() -> TrainingConfig:
     parser = argparse.ArgumentParser(description="Entropy-guided KD for LLMs")
     parser.add_argument("--teacher_model", required=True)
     parser.add_argument("--student_model", required=True)
-    parser.add_argument("--distill_category", choices=["off_policy", "on_policy"], default="off_policy",
-                        help="High-level training regime: off_policy distillation (default) or on_policy rollouts")
-    parser.add_argument("--student_quant_bits", type=int, choices=[4, 8], default=None,
-                        help="Optionally quantize student for memory (not typical during training)")
-    parser.add_argument("--distill_type", choices=[
-        "vanilla",
-        "top-k-tok",
-        "top-k-tok-dkd",
-        "random",
-        "random-dkd",
-        "bucket",
-        "pos-rs-kd",
-        "pos-rs-kd-dkd",
-        "linucb",
-        "linucb-dkd",
-        "atkd",
-        "dkd",
-    ], default="vanilla")
-    parser.add_argument("--k_percent", type=int, default=20, help="for top-k-tok and random")
+    parser.add_argument(
+        "--distill_category",
+        choices=["off_policy", "on_policy"],
+        default="off_policy",
+        help="High-level training regime: off_policy distillation (default) or on_policy rollouts",
+    )
+    parser.add_argument(
+        "--student_quant_bits",
+        type=int,
+        choices=[4, 8],
+        default=None,
+        help="Optionally quantize student for memory (not typical during training)",
+    )
+    parser.add_argument(
+        "--distill_type",
+        choices=[
+            "vanilla",
+            "top-k-tok",
+            "top-k-tok-dkd",
+            "random",
+            "random-dkd",
+            "bucket",
+            "pos-rs-kd",
+            "pos-rs-kd-dkd",
+            "linucb",
+            "linucb-dkd",
+            "atkd",
+            "dkd",
+        ],
+        default="vanilla",
+    )
+    parser.add_argument(
+        "--k_percent", type=int, default=20, help="for top-k-tok and random"
+    )
     parser.add_argument(
         "--atkd_hard_percent",
         type=float,
         default=50.0,
-        help="For AT-KD: percentage of tokens (by highest teacher uncertainty) treated as hard tokens per batch (default 50%).",
+        help="For AT-KD: percentage of tokens (by highest teacher uncertainty) treated as hard tokens per batch (default 50%%).",
     )
     parser.add_argument(
         "--atkd_loss_lambda",
@@ -318,7 +345,7 @@ def parse_args_to_config() -> TrainingConfig:
         dest="skip_by_frozen_student",
         action="store_true",
         default=_env_flag("SKIP_SAMPLES_BY_STUDENT", False),
-        help="When set, run a frozen pre-pass of the initial student to compute mean token entropy per sample, then distill only on the top l% highest-entropy samples during training.",
+        help="When set, run a frozen pre-pass of the initial student to compute mean token entropy per sample, then distill only on the top l%% highest-entropy samples during training.",
     )
     # Backwards-compatible alias
     parser.add_argument(
@@ -328,7 +355,7 @@ def parse_args_to_config() -> TrainingConfig:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
-        "--L_PERCENT_SAMPLES_TO_KEEP",
+        "--l_percent_samples_to_keep",
         type=float,
         default=_env_float("L_PERCENT_SAMPLES_TO_KEEP") or 20.0,
         help="Percentage (0-100) of samples to keep for distillation (top-entropy) when --skip_by_frozen_student is enabled (default 20).",
@@ -338,16 +365,20 @@ def parse_args_to_config() -> TrainingConfig:
         choices=["entropy", "kl", "ce_ratio", "random"],
         default=os.environ.get("SKIP_SAMPLES_STRATEGY", "entropy"),
         help=(
-            "Strategy for selecting the l% samples when --skip_by_frozen_student is enabled: "
-            "entropy (default) keeps the top-l% by frozen-student mean token entropy; "
-            "kl keeps the top-l% by mean token KL divergence between frozen teacher/student "
+            "Strategy for selecting the l%% samples when --skip_by_frozen_student is enabled: "
+            "entropy (default) keeps the top-l%% by frozen-student mean token entropy; "
+            "kl keeps the top-l%% by mean token KL divergence between frozen teacher/student "
             "(direction controlled by --kd_objective); "
-            "ce_ratio keeps the top-l% by mean CE_s/(CE_t+eps) between frozen teacher/student; "
-            "random keeps a random l% subset (no pre-pass)."
+            "ce_ratio keeps the top-l%% by mean CE_s/(CE_t+eps) between frozen teacher/student; "
+            "random keeps a random l%% subset (no pre-pass)."
         ),
     )
-    parser.add_argument("--kd_objective", choices=["forward", "reverse"], default=None,
-                        help="Direction of KL divergence: forward=teacher||student, reverse=student||teacher")
+    parser.add_argument(
+        "--kd_objective",
+        choices=["forward", "reverse"],
+        default=None,
+        help="Direction of KL divergence: forward=teacher||student, reverse=student||teacher",
+    )
     dkd_alpha_default = _env_float("DKD_ALPHA")
     dkd_beta_default = _env_float("DKD_BETA")
     parser.add_argument(
@@ -368,21 +399,50 @@ def parse_args_to_config() -> TrainingConfig:
         default=dkd_beta_default if dkd_beta_default is not None else 8.0,
         help="Weight for the DKD non-target term (NCKD)",
     )
-    parser.add_argument("--entropy_approx_temperature", type=float, default=2.0, help="Temperature for offline entropy approximation (and RS-KD proposal)")
+    parser.add_argument(
+        "--entropy_approx_temperature",
+        type=float,
+        default=2.0,
+        help="Temperature for offline entropy approximation (and RS-KD proposal)",
+    )
     # KD temperature annealing controls
-    parser.add_argument("--anneal_kd_temperature", action="store_true", default=False,
-                        help="Enable annealing of kd_temperature during training")
-    parser.add_argument("--kd_temperature_start", type=float, default=2.0,
-                        help="Starting KD temperature when annealing is enabled")
-    parser.add_argument("--kd_temperature_end", type=float, default=1.0,
-                        help="Final KD temperature when annealing is enabled")
-    parser.add_argument("--kd_hold_frac", type=float, default=0.6,
-                        help="Fraction of total updates to hold at start temperature before linear decay")
+    parser.add_argument(
+        "--anneal_kd_temperature",
+        action="store_true",
+        default=False,
+        help="Enable annealing of kd_temperature during training",
+    )
+    parser.add_argument(
+        "--kd_temperature_start",
+        type=float,
+        default=2.0,
+        help="Starting KD temperature when annealing is enabled",
+    )
+    parser.add_argument(
+        "--kd_temperature_end",
+        type=float,
+        default=1.0,
+        help="Final KD temperature when annealing is enabled",
+    )
+    parser.add_argument(
+        "--kd_hold_frac",
+        type=float,
+        default=0.6,
+        help="Fraction of total updates to hold at start temperature before linear decay",
+    )
     # RS-KD (position-sampling) hyperparams
-    parser.add_argument("--rs_alpha", type=float, default=1.0,
-                        help="Exponent on entropy for sampling dist: q(i) ∝ H_i^alpha (alpha∈[0,∞))")
-    parser.add_argument("--rs_floor", type=float, default=1e-6,
-                        help="Minimum probability floor to avoid huge weights / degeneracy")
+    parser.add_argument(
+        "--rs_alpha",
+        type=float,
+        default=1.0,
+        help="Exponent on entropy for sampling dist: q(i) ∝ H_i^alpha (alpha∈[0,∞))",
+    )
+    parser.add_argument(
+        "--rs_floor",
+        type=float,
+        default=1e-6,
+        help="Minimum probability floor to avoid huge weights / degeneracy",
+    )
     bucket_mode_default = _env_flag("BUCKET_MODE", _env_flag("RS_BUCKET_MODE", False))
     parser.add_argument(
         "--rs_bucket_mode",
@@ -406,13 +466,13 @@ def parse_args_to_config() -> TrainingConfig:
         "--bucket_lower_percent",
         type=int,
         default=int(float(os.environ.get("BUCKET_LOWER_PERCENT", 70))),
-        help="For bucket mode: lower bound percentile (skip bottom X%)",
+        help="For bucket mode: lower bound percentile (skip bottom X%%)",
     )
     parser.add_argument(
         "--bucket_upper_percent",
         type=int,
         default=int(float(os.environ.get("BUCKET_UPPER_PERCENT", 80))),
-        help="For bucket mode: upper bound percentile (skip top Y%)",
+        help="For bucket mode: upper bound percentile (skip top Y%%)",
     )
     parser.add_argument(
         "--pos_rs_match_full_kd",
@@ -507,47 +567,115 @@ def parse_args_to_config() -> TrainingConfig:
         default="unc",
         help="UDKD gate metric: 'unc'=1-p(target), 'entropy'=teacher H/log(V), 'student_entropy'=student H/log(V), 'kl'=KL(teacher||student), 'reverse_kl'=KL(student||teacher)",
     )
-    parser.add_argument("--score_token_selection", action="store_true", default=False,
-                        help="Rank tokens by composite score (entropy + student CE + KL) when selecting top-k/bucket tokens")
-    parser.add_argument("--score_normalize", choices=["none", "z", "minmax"], default="z",
-                        help="Normalization applied per example to score components before weighting")
-    parser.add_argument("--score_entropy_weight", type=float, default=1.0,
-                        help="Weight for teacher entropy component in score-based KD")
-    parser.add_argument("--score_ce_weight", type=float, default=1.0,
-                        help="Weight for student cross-entropy component in score-based KD")
-    parser.add_argument("--score_kl_weight", type=float, default=1.0,
-                        help="Weight for teacher-student KL component in score-based KD")
-    parser.add_argument("--bandit_alpha", type=float, default=1.0,
-                        help="Exploration coefficient for LinUCB contextual bandit")
-    parser.add_argument("--bandit_lambda", type=float, default=1.0,
-                        help="L2 regularization strength for LinUCB covariance matrix")
-    parser.add_argument("--bandit_threshold", type=float, default=0.5,
-                        help="Minimum UCB score required for LinUCB to keep a token")
-    parser.add_argument("--bandit_min_tokens", type=int, default=1,
-                        help="Force LinUCB to keep at least this many tokens per example")
-    parser.add_argument("--bandit_max_tokens", type=int, default=128,
-                        help="Optional cap on the number of tokens LinUCB can keep per example")
-    parser.add_argument("--bandit_device", type=str, default="cpu",
-                        help="Device to maintain LinUCB statistics (cpu or cuda)")
-    parser.add_argument("--bandit_reward_clip", type=float, default=25.0,
-                        help="Absolute clip value applied to KL improvement rewards before LinUCB updates")
-    parser.add_argument("--enable_ce", action="store_true", default=True, 
-                        help="Enable cross-entropy loss in addition to KD loss")
+    parser.add_argument(
+        "--score_token_selection",
+        action="store_true",
+        default=False,
+        help="Rank tokens by composite score (entropy + student CE + KL) when selecting top-k/bucket tokens",
+    )
+    parser.add_argument(
+        "--score_normalize",
+        choices=["none", "z", "minmax"],
+        default="z",
+        help="Normalization applied per example to score components before weighting",
+    )
+    parser.add_argument(
+        "--score_entropy_weight",
+        type=float,
+        default=1.0,
+        help="Weight for teacher entropy component in score-based KD",
+    )
+    parser.add_argument(
+        "--score_ce_weight",
+        type=float,
+        default=1.0,
+        help="Weight for student cross-entropy component in score-based KD",
+    )
+    parser.add_argument(
+        "--score_kl_weight",
+        type=float,
+        default=1.0,
+        help="Weight for teacher-student KL component in score-based KD",
+    )
+    parser.add_argument(
+        "--bandit_alpha",
+        type=float,
+        default=1.0,
+        help="Exploration coefficient for LinUCB contextual bandit",
+    )
+    parser.add_argument(
+        "--bandit_lambda",
+        type=float,
+        default=1.0,
+        help="L2 regularization strength for LinUCB covariance matrix",
+    )
+    parser.add_argument(
+        "--bandit_threshold",
+        type=float,
+        default=0.5,
+        help="Minimum UCB score required for LinUCB to keep a token",
+    )
+    parser.add_argument(
+        "--bandit_min_tokens",
+        type=int,
+        default=1,
+        help="Force LinUCB to keep at least this many tokens per example",
+    )
+    parser.add_argument(
+        "--bandit_max_tokens",
+        type=int,
+        default=128,
+        help="Optional cap on the number of tokens LinUCB can keep per example",
+    )
+    parser.add_argument(
+        "--bandit_device",
+        type=str,
+        default="cpu",
+        help="Device to maintain LinUCB statistics (cpu or cuda)",
+    )
+    parser.add_argument(
+        "--bandit_reward_clip",
+        type=float,
+        default=25.0,
+        help="Absolute clip value applied to KL improvement rewards before LinUCB updates",
+    )
+    parser.add_argument(
+        "--enable_ce",
+        action="store_true",
+        default=True,
+        help="Enable cross-entropy loss in addition to KD loss",
+    )
     parser.add_argument(
         "--enable_ce_on_all_tokens",
         action="store_true",
         default=False,
         help="Apply cross-entropy loss to every valid token even when KD selects a subset",
     )
-    parser.add_argument("--alpha_ce", type=float, default=0.3,
-                        help="Weight for cross-entropy loss (vs KD loss). Total loss = (1-alpha_ce)*L_KD + alpha_ce*L_CE")
+    parser.add_argument(
+        "--alpha_ce",
+        type=float,
+        default=0.3,
+        help="Weight for cross-entropy loss (vs KD loss). Total loss = (1-alpha_ce)*L_KD + alpha_ce*L_CE",
+    )
     parser.add_argument("--datasets", nargs="+", required=True)
-    parser.add_argument("--prompt_col", type=str, default=None,
-                        help="name of text prompt column for HF datasets")
-    parser.add_argument("--answer_col", type=str, default=None,
-                        help="name of answer column for HF datasets")
-    parser.add_argument("--fineweb_tokens", type=int, default=50_000_000,
-                        help="Token budget when streaming FineWeb-Edu (used when datasets[0] == 'fineweb')")
+    parser.add_argument(
+        "--prompt_col",
+        type=str,
+        default=None,
+        help="name of text prompt column for HF datasets",
+    )
+    parser.add_argument(
+        "--answer_col",
+        type=str,
+        default=None,
+        help="name of answer column for HF datasets",
+    )
+    parser.add_argument(
+        "--fineweb_tokens",
+        type=int,
+        default=50_000_000,
+        help="Token budget when streaming FineWeb-Edu (used when datasets[0] == 'fineweb')",
+    )
     parser.add_argument(
         "--disable_packing",
         dest="enable_packing",
@@ -563,13 +691,21 @@ def parse_args_to_config() -> TrainingConfig:
     parser.set_defaults(enable_packing=True)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=128)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, 
-                        help="Number of steps to accumulate gradients before updating")
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=4,
+        help="Number of steps to accumulate gradients before updating",
+    )
     parser.add_argument("--max_seq_len", type=int, default=512)  # to save memory
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--output_dir", required=True)
-    parser.add_argument("--tensorboard_dir", type=str, default="tb", 
-                        help="Directory for TensorBoard logs")
+    parser.add_argument(
+        "--tensorboard_dir",
+        type=str,
+        default="tb",
+        help="Directory for TensorBoard logs",
+    )
     parser.add_argument(
         "--log_efficiency_csv",
         action="store_true",
@@ -579,7 +715,9 @@ def parse_args_to_config() -> TrainingConfig:
     parser.add_argument(
         "--efficiency_csv_path",
         type=str,
-        default=os.environ.get("EFFICIENCY_CSV_PATH", "results/table_efficiency_test.csv"),
+        default=os.environ.get(
+            "EFFICIENCY_CSV_PATH", "results/table_efficiency_test.csv"
+        ),
         help="CSV output path for efficiency metrics when --log_efficiency_csv is enabled.",
     )
     parser.add_argument(
@@ -591,13 +729,23 @@ def parse_args_to_config() -> TrainingConfig:
     parser.add_argument(
         "--skipping_indices_path",
         type=str,
-        default=os.environ.get("SKIPPING_INDICES_PATH", "results/skipping_indices.json"),
+        default=os.environ.get(
+            "SKIPPING_INDICES_PATH", "results/skipping_indices.json"
+        ),
         help="JSONL output path for skip-sample indices when --log_skipping_indices is enabled.",
     )
-    parser.add_argument("--checkpoint_steps", type=int, default=500,
-                        help="Save checkpoint every N steps (0 to disable)")
-    parser.add_argument("--keep_checkpoints", type=int, default=3,
-                        help="Number of recent checkpoints to keep")
+    parser.add_argument(
+        "--checkpoint_steps",
+        type=int,
+        default=500,
+        help="Save checkpoint every N steps (0 to disable)",
+    )
+    parser.add_argument(
+        "--keep_checkpoints",
+        type=int,
+        default=3,
+        help="Number of recent checkpoints to keep",
+    )
     parser.add_argument(
         "--resume_from_checkpoint",
         type=str,
@@ -614,12 +762,20 @@ def parse_args_to_config() -> TrainingConfig:
         "--dataset_config",
         type=str,
         default=None,
-        help="(Optional) HF dataset config, e.g. for gsm8k use '--dataset_config main' or 'socratic'"
+        help="(Optional) HF dataset config, e.g. for gsm8k use '--dataset_config main' or 'socratic'",
     )
-    parser.add_argument("--offline_cache", action="store_true", default=True,
-                        help="Enable offline caching mode: automatically create/use teacher cache for entropy approximation and vocab RS-KD.")
-    parser.add_argument("--no_offline_cache", dest="offline_cache", action="store_false",
-                        help="Disable offline caching mode (use online teacher forward pass).")
+    parser.add_argument(
+        "--offline_cache",
+        action="store_true",
+        default=True,
+        help="Enable offline caching mode: automatically create/use teacher cache for entropy approximation and vocab RS-KD.",
+    )
+    parser.add_argument(
+        "--no_offline_cache",
+        dest="offline_cache",
+        action="store_false",
+        help="Disable offline caching mode (use online teacher forward pass).",
+    )
     parser.add_argument(
         "--offline_cache_selected_only",
         action="store_true",
@@ -632,8 +788,12 @@ def parse_args_to_config() -> TrainingConfig:
         action="store_false",
         help="Disable selected-only offline cache behavior.",
     )
-    parser.add_argument("--offline_cache_dir", type=str, default=None,
-                        help="Where to store/read the offline teacher cache (defaults under output_dir).")
+    parser.add_argument(
+        "--offline_cache_dir",
+        type=str,
+        default=None,
+        help="Where to store/read the offline teacher cache (defaults under output_dir).",
+    )
     parser.add_argument(
         "--offline_cache_force_hash",
         type=str,
@@ -736,78 +896,194 @@ def parse_args_to_config() -> TrainingConfig:
         default="entropy",
         help="Offline cache mode: entropy_approx (truncated), entropy (exact), unc (store target probabilities), or none (store no teacher uncertainty metric).",
     )
-    parser.add_argument("--entropy_approx_m", type=int, default=12,
-                        help="Top-k for truncated-entropy approximation, m=12 by default.")
-    parser.add_argument("--rs_vocab_samples", type=int, default=64,
-                        help="How many vocab tokens to sample per position for RS-KD. 36 bytes per position")
-    parser.add_argument("--rs_vocab_beta", type=float, default=1.0,
-                        help="Proposal exponent: q ∝ p^beta (beta=1 is proportional to p).")
+    parser.add_argument(
+        "--entropy_approx_m",
+        type=int,
+        default=12,
+        help="Top-k for truncated-entropy approximation, m=12 by default.",
+    )
+    parser.add_argument(
+        "--rs_vocab_samples",
+        type=int,
+        default=64,
+        help="How many vocab tokens to sample per position for RS-KD. 36 bytes per position",
+    )
+    parser.add_argument(
+        "--rs_vocab_beta",
+        type=float,
+        default=1.0,
+        help="Proposal exponent: q ∝ p^beta (beta=1 is proportional to p).",
+    )
 
     # On-policy distillation configuration
-    parser.add_argument("--on_policy_max_new_tokens", type=int, default=256,
-                        help="Maximum number of new tokens generated per student rollout (on-policy mode)")
-    parser.add_argument("--on_policy_temperature", type=float, default=0.7,
-                        help="Sampling temperature for student-generated rollouts (on-policy mode)")
-    parser.add_argument("--on_policy_top_p", type=float, default=0.9,
-                        help="Top-p (nucleus) sampling cutoff for student rollouts")
-    parser.add_argument("--on_policy_group_size", type=int, default=1,
-                        help="Number of student rollouts sampled per prompt in on-policy mode")
-    parser.add_argument("--on_policy_reverse_kl_weight", type=float, default=1.0,
-                        help="Weight applied to reverse KL (student||teacher) when training on-policy")
-    parser.add_argument("--on_policy_forward_kl_weight", type=float, default=0.0,
-                        help="Weight applied to forward KL (teacher||student) during on-policy training")
-    parser.add_argument("--on_policy_curriculum", action="store_true", default=False,
-                        help="Enable curriculum schedule for k_percent during on-policy training")
-    parser.add_argument("--on_policy_curriculum_steps", type=int, default=1000,
-                        help="Number of optimizer updates to anneal k_percent towards its target value")
-    parser.add_argument("--on_policy_curriculum_start_k", type=float, default=5.0,
-                        help="Initial k_percent (percentage) when curriculum starts in on-policy mode")
-    parser.add_argument("--on_policy_curriculum_power", type=float, default=1.0,
-                        help="Exponent applied to normalized curriculum progress (1.0 = linear)")
-    parser.add_argument("--on_policy_forward_self_norm", dest="on_policy_forward_self_norm",
-                        action="store_true", default=True,
-                        help="Use self-normalized importance weights for forward KL estimator in on-policy mode")
-    parser.add_argument("--on_policy_no_forward_self_norm", dest="on_policy_forward_self_norm",
-                        action="store_false",
-                        help="Disable self-normalized weights when estimating forward KL in on-policy mode")
-    parser.add_argument("--on_policy_do_sample", dest="on_policy_do_sample", action="store_true", default=True,
-                        help="Enable stochastic sampling for student rollouts (default)")
-    parser.add_argument("--on_policy_no_sample", dest="on_policy_do_sample", action="store_false",
-                        help="Disable sampling and use greedy decoding for student rollouts")
-    parser.add_argument("--enable_cuts_in_the_middle_for_on_policy", dest="enable_cuts_in_the_middle_for_on_policy",
-                        action="store_true",
-                        help="Sample middle cut points for on-policy FineWeb prompts before generation.")
-    parser.add_argument("--disable_cuts_in_the_middle_for_on_policy", dest="enable_cuts_in_the_middle_for_on_policy",
-                        action="store_false",
-                        help="Disable middle cut sampling for on-policy rollouts.")
-    parser.add_argument("--on_policy_cut_min_tokens", type=int, default=12,
-                        help="Minimum number of rollout tokens to force after a middle cut (on-policy mode).")
-    parser.add_argument("--on_policy_cut_max_tokens", type=int, default=32,
-                        help="Maximum number of rollout tokens to force after a middle cut (on-policy mode).")
-    parser.add_argument("--on_policy_cut_min_context", type=int, default=128,
-                        help="Minimum prefix length retained before the sampled cut (on-policy mode).")
+    parser.add_argument(
+        "--on_policy_max_new_tokens",
+        type=int,
+        default=256,
+        help="Maximum number of new tokens generated per student rollout (on-policy mode)",
+    )
+    parser.add_argument(
+        "--on_policy_temperature",
+        type=float,
+        default=0.7,
+        help="Sampling temperature for student-generated rollouts (on-policy mode)",
+    )
+    parser.add_argument(
+        "--on_policy_top_p",
+        type=float,
+        default=0.9,
+        help="Top-p (nucleus) sampling cutoff for student rollouts",
+    )
+    parser.add_argument(
+        "--on_policy_group_size",
+        type=int,
+        default=1,
+        help="Number of student rollouts sampled per prompt in on-policy mode",
+    )
+    parser.add_argument(
+        "--on_policy_reverse_kl_weight",
+        type=float,
+        default=1.0,
+        help="Weight applied to reverse KL (student||teacher) when training on-policy",
+    )
+    parser.add_argument(
+        "--on_policy_forward_kl_weight",
+        type=float,
+        default=0.0,
+        help="Weight applied to forward KL (teacher||student) during on-policy training",
+    )
+    parser.add_argument(
+        "--on_policy_curriculum",
+        action="store_true",
+        default=False,
+        help="Enable curriculum schedule for k_percent during on-policy training",
+    )
+    parser.add_argument(
+        "--on_policy_curriculum_steps",
+        type=int,
+        default=1000,
+        help="Number of optimizer updates to anneal k_percent towards its target value",
+    )
+    parser.add_argument(
+        "--on_policy_curriculum_start_k",
+        type=float,
+        default=5.0,
+        help="Initial k_percent (percentage) when curriculum starts in on-policy mode",
+    )
+    parser.add_argument(
+        "--on_policy_curriculum_power",
+        type=float,
+        default=1.0,
+        help="Exponent applied to normalized curriculum progress (1.0 = linear)",
+    )
+    parser.add_argument(
+        "--on_policy_forward_self_norm",
+        dest="on_policy_forward_self_norm",
+        action="store_true",
+        default=True,
+        help="Use self-normalized importance weights for forward KL estimator in on-policy mode",
+    )
+    parser.add_argument(
+        "--on_policy_no_forward_self_norm",
+        dest="on_policy_forward_self_norm",
+        action="store_false",
+        help="Disable self-normalized weights when estimating forward KL in on-policy mode",
+    )
+    parser.add_argument(
+        "--on_policy_do_sample",
+        dest="on_policy_do_sample",
+        action="store_true",
+        default=True,
+        help="Enable stochastic sampling for student rollouts (default)",
+    )
+    parser.add_argument(
+        "--on_policy_no_sample",
+        dest="on_policy_do_sample",
+        action="store_false",
+        help="Disable sampling and use greedy decoding for student rollouts",
+    )
+    parser.add_argument(
+        "--enable_cuts_in_the_middle_for_on_policy",
+        dest="enable_cuts_in_the_middle_for_on_policy",
+        action="store_true",
+        help="Sample middle cut points for on-policy FineWeb prompts before generation.",
+    )
+    parser.add_argument(
+        "--disable_cuts_in_the_middle_for_on_policy",
+        dest="enable_cuts_in_the_middle_for_on_policy",
+        action="store_false",
+        help="Disable middle cut sampling for on-policy rollouts.",
+    )
+    parser.add_argument(
+        "--on_policy_cut_min_tokens",
+        type=int,
+        default=12,
+        help="Minimum number of rollout tokens to force after a middle cut (on-policy mode).",
+    )
+    parser.add_argument(
+        "--on_policy_cut_max_tokens",
+        type=int,
+        default=32,
+        help="Maximum number of rollout tokens to force after a middle cut (on-policy mode).",
+    )
+    parser.add_argument(
+        "--on_policy_cut_min_context",
+        type=int,
+        default=128,
+        help="Minimum prefix length retained before the sampled cut (on-policy mode).",
+    )
     parser.set_defaults(enable_cuts_in_the_middle_for_on_policy=True)
 
-    # Global-Level Selection (GLS) over tokens — only impacts top-k-tok when enabled
-    parser.add_argument("--gls_enabled", action="store_true", default=False,
-                        help="Enable global-level selection FIFO queue (only impacts top-k-tok)")
-    parser.add_argument("--gls_queue_size", type=int, default=30000,
-                        help="Capacity of GLS FIFO queue for computing global threshold")
-    parser.add_argument("--gls_log_threshold", action="store_true", default=False,
-                        help="Log the GLS threshold each time it's computed")
+    # Global-Level Selection (GLS) over tokens - only impacts top-k-tok when enabled
+    parser.add_argument(
+        "--gls_enabled",
+        action="store_true",
+        default=False,
+        help="Enable global-level selection FIFO queue (only impacts top-k-tok)",
+    )
+    parser.add_argument(
+        "--gls_queue_size",
+        type=int,
+        default=30000,
+        help="Capacity of GLS FIFO queue for computing global threshold",
+    )
+    parser.add_argument(
+        "--gls_log_threshold",
+        action="store_true",
+        default=False,
+        help="Log the GLS threshold each time it's computed",
+    )
     # Unified upsert registry controls
-    parser.add_argument("--runs_registry_validation", type=str, default="results/runs_validation.json",
-                        help="Path to the validation split runs JSON registry.")
-    parser.add_argument("--runs_registry_test", type=str, default="results/runs_test.json",
-                        help="Path to the test split runs JSON registry.")
-    parser.add_argument("--override", action="store_true", default=False,
-                        help="If set, run even if an identical-params hash already exists in the registry.")
+    parser.add_argument(
+        "--runs_registry_validation",
+        type=str,
+        default="results/runs_validation.json",
+        help="Path to the validation split runs JSON registry.",
+    )
+    parser.add_argument(
+        "--runs_registry_test",
+        type=str,
+        default="results/runs_test.json",
+        help="Path to the test split runs JSON registry.",
+    )
+    parser.add_argument(
+        "--override",
+        action="store_true",
+        default=False,
+        help="If set, run even if an identical-params hash already exists in the registry.",
+    )
     # Reproducibility
     default_seed = int(os.environ.get("SEED", "1337"))
     default_det = bool(int(os.environ.get("DETERMINISTIC", "0")))
-    parser.add_argument("--seed", type=int, default=default_seed, help="Random seed for reproducibility")
-    parser.add_argument("--deterministic", action="store_true", default=default_det,
-                        help="Enable deterministic algorithms (may slow down, sets cudnn.deterministic and use_deterministic_algorithms)")
+    parser.add_argument(
+        "--seed", type=int, default=default_seed, help="Random seed for reproducibility"
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        default=default_det,
+        help="Enable deterministic algorithms (may slow down, sets cudnn.deterministic and use_deterministic_algorithms)",
+    )
     args = parser.parse_args()
 
     if args.resume_from_checkpoint is not None:
@@ -824,12 +1100,16 @@ def parse_args_to_config() -> TrainingConfig:
     if args.offline_cache_selected_only is None:
         env_selected_only = os.environ.get("OFFLINE_CACHE_SELECTED_ONLY")
         if env_selected_only is not None:
-            args.offline_cache_selected_only = _env_flag("OFFLINE_CACHE_SELECTED_ONLY", False)
+            args.offline_cache_selected_only = _env_flag(
+                "OFFLINE_CACHE_SELECTED_ONLY", False
+            )
         else:
             args.offline_cache_selected_only = bool(args.skip_by_frozen_student)
 
     if args.kd_objective is None:
-        args.kd_objective = "reverse" if args.distill_category == "on_policy" else "forward"
+        args.kd_objective = (
+            "reverse" if args.distill_category == "on_policy" else "forward"
+        )
 
     if args.distill_category == "on_policy":
         # Force settings compatible with on-policy rollouts unless user explicitly overrides later.
@@ -863,7 +1143,9 @@ class DistillationEntrypoint:
 
         self.params_dict = self._config_to_dict()
         self.launch_seed = _env_int("AUTOPILOT_LAUNCH_SEED")
-        self.base_seed = self.launch_seed if self.launch_seed is not None else int(self.config.seed)
+        self.base_seed = (
+            self.launch_seed if self.launch_seed is not None else int(self.config.seed)
+        )
         self.seed_offset = self.base_seed + self.ddp_rank
 
         self.registry_paths_to_update: List[Path] = []
@@ -892,7 +1174,14 @@ class DistillationEntrypoint:
         self.cache_ready = False
         self.teacher_required = False
         self.teacher_rank0_only = False
-        self.teacherless_modes = {"vanilla", "top-k-tok", "bucket", "random", "linucb", "linucb-dkd"}
+        self.teacherless_modes = {
+            "vanilla",
+            "top-k-tok",
+            "bucket",
+            "random",
+            "linucb",
+            "linucb-dkd",
+        }
         if getattr(self.config, "offline_cache_mode", "entropy") == "unc":
             self.teacherless_modes = self.teacherless_modes | {"atkd"}
         if self.config.distill_category == "on_policy":
@@ -975,7 +1264,9 @@ class DistillationEntrypoint:
                 pass
             weight_path = None
             try:
-                weight_path = cached_file(model_name, weight_name, local_files_only=True)
+                weight_path = cached_file(
+                    model_name, weight_name, local_files_only=True
+                )
             except Exception:
                 weight_path = None
             if not weight_path:
@@ -986,9 +1277,13 @@ class DistillationEntrypoint:
                 continue
         return None
 
-    def _build_training_dataloader(self, *, use_distributed_sampler: bool) -> DataLoader:
+    def _build_training_dataloader(
+        self, *, use_distributed_sampler: bool
+    ) -> DataLoader:
         if self.packed_dataset is None or self.collate is None:
-            raise RuntimeError("Dataset or collator not initialized before building dataloader.")
+            raise RuntimeError(
+                "Dataset or collator not initialized before building dataloader."
+            )
 
         gen = torch.Generator()
         gen.manual_seed(self.base_seed)
@@ -1039,6 +1334,7 @@ class DistillationEntrypoint:
             del self.teacher
             self.teacher = None
             import gc
+
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -1046,7 +1342,9 @@ class DistillationEntrypoint:
         destroy_distributed()
 
         if not self.is_main_rank:
-            print("[ddp-offline] Cache build complete. Exiting non-main rank.", flush=True)
+            print(
+                "[ddp-offline] Cache build complete. Exiting non-main rank.", flush=True
+            )
             return True
 
         # Rank 0 continues with single-process training
@@ -1061,7 +1359,9 @@ class DistillationEntrypoint:
         self.dl = self._build_training_dataloader(use_distributed_sampler=False)
         return False
 
-    def _estimate_role_expected_vram(self, weight_bytes: Optional[int], role: str) -> Optional[float]:
+    def _estimate_role_expected_vram(
+        self, weight_bytes: Optional[int], role: str
+    ) -> Optional[float]:
         """Heuristically expand raw weights into expected peak VRAM."""
         if not weight_bytes or weight_bytes <= 0:
             return None
@@ -1084,7 +1384,9 @@ class DistillationEntrypoint:
         teacher_vram = self._estimate_role_expected_vram(teacher_bytes, "teacher")
 
         heavier = "student"
-        if teacher_vram is not None and (student_vram is None or teacher_vram > student_vram * 1.05):
+        if teacher_vram is not None and (
+            student_vram is None or teacher_vram > student_vram * 1.05
+        ):
             heavier = "teacher"
 
         if self.is_main_rank and (student_vram is not None or teacher_vram is not None):
@@ -1134,12 +1436,12 @@ class DistillationEntrypoint:
         # If SLURM provides a local scratch (e.g., /dev/shm), use it; fall back to repo tmp
         node_tmp = os.environ.get("TMPDIR")
         if not node_tmp:
-            shm_candidate = f"/dev/shm/{os.environ.get('USER', 'user')}.sampledkd.{os.environ.get('SLURM_JOB_ID', 'local')}"
+            shm_candidate = f"/dev/shm/{os.environ.get('USER', 'user')}.sekd.{os.environ.get('SLURM_JOB_ID', 'local')}"
             try:
                 os.makedirs(shm_candidate, exist_ok=True)
                 node_tmp = shm_candidate
             except Exception:
-                node_tmp = f"/home/joberant/NLP_2425b/{os.environ.get('USER', 'user')}/sampledkd/tmp"
+                node_tmp = f"/tmp/sekd/{os.environ.get('USER', 'user')}"
             os.environ["TMPDIR"] = node_tmp
         # Point HF caches to tmp (can still hit shared cache via symlink if needed)
         os.environ.setdefault("HF_HOME", os.path.join(node_tmp, "hf"))
@@ -1163,11 +1465,22 @@ class DistillationEntrypoint:
         # ----------------- runs registry preflight -----------------
         default_test_path = Path("results/runs_test.json")
         default_validation_path = Path("results/runs_validation.json")
-        registry_path_test = Path(getattr(self.config, "runs_registry_test", str(default_test_path)))
-        registry_path_validation = Path(getattr(self.config, "runs_registry_validation", str(default_validation_path)))
+        registry_path_test = Path(
+            getattr(self.config, "runs_registry_test", str(default_test_path))
+        )
+        registry_path_validation = Path(
+            getattr(
+                self.config, "runs_registry_validation", str(default_validation_path)
+            )
+        )
 
-        if registry_path_validation == default_validation_path and registry_path_test != default_test_path:
-            registry_path_validation = registry_path_test.with_name("runs_validation.json")
+        if (
+            registry_path_validation == default_validation_path
+            and registry_path_test != default_test_path
+        ):
+            registry_path_validation = registry_path_test.with_name(
+                "runs_validation.json"
+            )
 
         seen_paths: Set[str] = set()
         for candidate in (registry_path_validation, registry_path_test):
@@ -1185,15 +1498,25 @@ class DistillationEntrypoint:
         self.primary_registry_path = Path(registry_path_test).resolve()
 
         if self.is_main_rank:
-            if registry_exists(self.primary_registry_path, self.params_hash) and not getattr(self.config, "override", False):
+            if registry_exists(
+                self.primary_registry_path, self.params_hash
+            ) and not getattr(self.config, "override", False):
                 entry = get_entry(self.primary_registry_path, self.params_hash)
                 completed_eval = bool(entry and entry.get("completed_eval"))
                 runs_info = entry.get("runs", {}) if entry else {}
-                existing_output_dir = (runs_info.get("train") or {}).get("output_dir") if runs_info else None
-                print(f"[registry] Run with identical parameters already exists (id={self.params_hash}). Use --override to force rerun. Exiting gracefully.")
+                existing_output_dir = (
+                    (runs_info.get("train") or {}).get("output_dir")
+                    if runs_info
+                    else None
+                )
+                print(
+                    f"[registry] Run with identical parameters already exists (id={self.params_hash}). Use --override to force rerun. Exiting gracefully."
+                )
                 needs_eval = not completed_eval
                 meta_output_dir = existing_output_dir or ""
-                print(f"[registry] duplicate params_hash={self.params_hash} needs_eval={int(needs_eval)} output_dir={meta_output_dir}")
+                print(
+                    f"[registry] duplicate params_hash={self.params_hash} needs_eval={int(needs_eval)} output_dir={meta_output_dir}"
+                )
                 sys.exit(11 if needs_eval else 10)
 
         self._create_experiment_name()
@@ -1295,7 +1618,9 @@ class DistillationEntrypoint:
             gpu_mem_snapshot.append((idx, free_gb, total_gb))
 
         if not gpu_mem_snapshot:
-            raise RuntimeError("No CUDA devices discovered after applying visibility filters.")
+            raise RuntimeError(
+                "No CUDA devices discovered after applying visibility filters."
+            )
 
         gpu_mem_snapshot.sort(key=lambda x: x[1], reverse=True)
         self.gpu_mem_snapshot = gpu_mem_snapshot
@@ -1310,13 +1635,19 @@ class DistillationEntrypoint:
 
         if self.is_main_rank:
             free_summary = ", ".join(
-                f"{idx}:{free:.1f}/{total:.1f}GB" for idx, free, total in gpu_mem_snapshot
+                f"{idx}:{free:.1f}/{total:.1f}GB"
+                for idx, free, total in gpu_mem_snapshot
             )
-            print(f"[device-planning] GPU free memory snapshot (prioritized): [{free_summary}]", flush=True)
+            print(
+                f"[device-planning] GPU free memory snapshot (prioritized): [{free_summary}]",
+                flush=True,
+            )
 
         if self.ddp_world_size > 1:
             if self.ddp_local_rank >= len(self.local_avail):
-                raise RuntimeError(f"LOCAL_RANK={self.ddp_local_rank} exceeds available GPUs {self.local_avail}")
+                raise RuntimeError(
+                    f"LOCAL_RANK={self.ddp_local_rank} exceeds available GPUs {self.local_avail}"
+                )
             self.student_local = self.ddp_local_rank
             self.student_device = torch.device(f"cuda:{self.student_local}")
             self.teacher_locals = [self.student_local]
@@ -1329,9 +1660,13 @@ class DistillationEntrypoint:
 
         if self.is_main_rank:
             print(f"CUDA_VISIBLE_DEVICES: {cvd}")
-            print(f"Available GPUs (local priority order): {self.available_gpu_priority}")
+            print(
+                f"Available GPUs (local priority order): {self.available_gpu_priority}"
+            )
         if self.is_main_rank and len(self.available_gpu_priority) > 1:
-            print(f"[device-planning] Initial student GPU candidate: {self.student_local} (priority order will be reconciled later)")
+            print(
+                f"[device-planning] Initial student GPU candidate: {self.student_local} (priority order will be reconciled later)"
+            )
         print(f"[rank {self.ddp_rank}] Student GPU (local): {self.student_local}")
         print(f"[rank {self.ddp_rank}] Teacher GPUs (local): {self.teacher_locals}")
 
@@ -1342,7 +1677,9 @@ class DistillationEntrypoint:
         if not self.available_gpu_priority:
             raise RuntimeError("GPU inventory unavailable when applying device policy.")
 
-        mem_map: Dict[int, tuple[float, float]] = {idx: (free, total) for idx, free, total in self.gpu_mem_snapshot}
+        mem_map: Dict[int, tuple[float, float]] = {
+            idx: (free, total) for idx, free, total in self.gpu_mem_snapshot
+        }
         threshold = self.large_gpu_threshold_gb
         teacher_needed = bool(self.teacher_required)
         heavier_role = "student"
@@ -1375,7 +1712,10 @@ class DistillationEntrypoint:
                     raise RuntimeError(
                         "Teacher required but no GPU meets the large-memory threshold and fewer than two GPUs are available."
                     )
-                first_gpu, second_gpu = self.available_gpu_priority[0], self.available_gpu_priority[1]
+                first_gpu, second_gpu = (
+                    self.available_gpu_priority[0],
+                    self.available_gpu_priority[1],
+                )
                 if heavier_role == "teacher":
                     teacher_gpu, student_gpu = first_gpu, second_gpu
                 else:
@@ -1416,7 +1756,9 @@ class DistillationEntrypoint:
         if self.tok.pad_token_id is None and self.tok.eos_token is not None:
             self.tok.pad_token = self.tok.eos_token
 
-        if self.config.distill_category == "on_policy" and getattr(self.config, "enable_packing", True):
+        if self.config.distill_category == "on_policy" and getattr(
+            self.config, "enable_packing", True
+        ):
             try:
                 self.config.enable_packing = False
             except Exception:
@@ -1428,7 +1770,9 @@ class DistillationEntrypoint:
         else:
             if self.config.datasets[0].lower() == "fineweb":
                 budget = int(getattr(self.config, "fineweb_tokens", 50_000_000))
-                print(f"Loading FineWeb-Edu subset with {budget:,} tokens, seed {self.base_seed}")
+                print(
+                    f"Loading FineWeb-Edu subset with {budget:,} tokens, seed {self.base_seed}"
+                )
                 cached_examples = load_fineweb_subset(
                     self.tok,
                     max_tokens=budget,
@@ -1440,7 +1784,9 @@ class DistillationEntrypoint:
             else:
                 print(f"Loading Hugging Face dataset: {self.config.datasets[0]}")
                 hf_dataset = (
-                    load_dataset(self.config.datasets[0], self.config.dataset_config)["train"]
+                    load_dataset(self.config.datasets[0], self.config.dataset_config)[
+                        "train"
+                    ]
                     if self.config.dataset_config
                     else load_dataset(self.config.datasets[0])["train"]
                 )
@@ -1450,7 +1796,11 @@ class DistillationEntrypoint:
                 raw_texts = []
                 for ex in hf_dataset:
                     prompt_text = ex[prompt_col]
-                    if answer_col is not None and answer_col in ex and ex[answer_col] is not None:
+                    if (
+                        answer_col is not None
+                        and answer_col in ex
+                        and ex[answer_col] is not None
+                    ):
                         raw_texts.append(f"{prompt_text}\n{ex[answer_col]}")
                     else:
                         raw_texts.append(prompt_text)
@@ -1458,7 +1808,9 @@ class DistillationEntrypoint:
         if getattr(self.config, "enable_packing", True):
             dataset = PackedTokenDataset(raw_texts, self.tok, self.config.max_seq_len)
             if len(dataset) == 0:
-                raise RuntimeError("Packed dataset is empty. Reduce max_seq_len or provide longer input texts.")
+                raise RuntimeError(
+                    "Packed dataset is empty. Reduce max_seq_len or provide longer input texts."
+                )
         else:
             dataset = PromptDataset(raw_texts)
             if len(dataset) == 0:
@@ -1493,8 +1845,7 @@ class DistillationEntrypoint:
         if selection_pending:
             teacher_required = True
             teacher_rank0_only = bool(
-                teacher_required
-                and getattr(self.config, "ddp_world_size", 1) > 1
+                teacher_required and getattr(self.config, "ddp_world_size", 1) > 1
             )
             cache_plan = CachePlan(
                 signature={},
@@ -1525,7 +1876,10 @@ class DistillationEntrypoint:
                     and _auto_torchrun_cache_enabled()
                     and _visible_gpu_count() >= 2
                 ):
-                    print("[logits-cache] Missing cache; auto-building with torchrun.", flush=True)
+                    print(
+                        "[logits-cache] Missing cache; auto-building with torchrun.",
+                        flush=True,
+                    )
                     _run_offline_cache_torchrun(self.config)
                     cache_plan = plan_offline_cache(
                         self.config,
@@ -1547,8 +1901,7 @@ class DistillationEntrypoint:
         # should load its own teacher to build its partition of the cache in parallel.
         # Only force teacher_rank0_only AFTER cache is complete (for training phase).
         ddp_parallel_cache_build = (
-            getattr(self.config, "ddp_world_size", 1) > 1
-            and not cache_plan.cache_ready
+            getattr(self.config, "ddp_world_size", 1) > 1 and not cache_plan.cache_ready
         )
         force_rank0_teacher = (
             self.teacher_required
@@ -1559,13 +1912,17 @@ class DistillationEntrypoint:
             cache_plan.teacher_rank0_only = True
             self.teacher_rank0_only = True
             if self.is_main_rank:
-                print("[device-planning] Hosting teacher on rank 0 only; other ranks will request logits via broadcast.")
+                print(
+                    "[device-planning] Hosting teacher on rank 0 only; other ranks will request logits via broadcast."
+                )
         elif ddp_parallel_cache_build and self.teacher_required:
             # During parallel cache build, each rank loads its own teacher
             cache_plan.teacher_rank0_only = False
             self.teacher_rank0_only = False
             if self.is_main_rank:
-                print("[device-planning] DDP parallel cache build: each rank loading its own teacher.")
+                print(
+                    "[device-planning] DDP parallel cache build: each rank loading its own teacher."
+                )
             # Avoid multiple ranks loading the teacher on the same GPU during cache build.
             self.teacher_locals = [self.student_local]
             self.teacher_student_exclusion = None
@@ -1579,16 +1936,17 @@ class DistillationEntrypoint:
             if will_load_teacher and not ddp_parallel_cache_build:
                 dedicated_candidates: List[int] = []
                 if len(self.local_avail) >= 2:
-                    dedicated_candidates = [g for g in self.local_avail if g != self.student_local]
+                    dedicated_candidates = [
+                        g for g in self.local_avail if g != self.student_local
+                    ]
                 if dedicated_candidates:
                     if self.teacher_student_exclusion != self.student_local:
                         self.teacher_student_exclusion = self.student_local
                     if self.teacher_locals != dedicated_candidates:
                         self.teacher_locals = dedicated_candidates
                         should_log_pref = (
-                            (self.teacher_rank0_only and self.ddp_rank == 0)
-                            or (not self.teacher_rank0_only and self.is_main_rank)
-                        )
+                            self.teacher_rank0_only and self.ddp_rank == 0
+                        ) or (not self.teacher_rank0_only and self.is_main_rank)
                         if should_log_pref:
                             print(
                                 f"[device-planning] Preferring dedicated teacher GPU(s) {self.teacher_locals} with student on {self.student_local}",
@@ -1599,31 +1957,42 @@ class DistillationEntrypoint:
         self.teacher_inputs_device = torch.device("cpu")
         if self.teacher_required:
             teacher_bytes = self._estimate_model_weight_bytes(self.config.teacher_model)
-            teacher_min_free_gb = self._estimate_role_expected_vram(teacher_bytes, "teacher")
+            teacher_min_free_gb = self._estimate_role_expected_vram(
+                teacher_bytes, "teacher"
+            )
             load_here = not self.teacher_rank0_only or is_rank0()
             if load_here:
                 if self.is_main_rank:
                     print("Loading teacher with GPU-first fallback...", flush=True)
-                self.teacher, _, self.teacher_inputs_device = load_teacher_with_fallback(
-                    model_name=self.config.teacher_model,
-                    prefer_gpus=self.teacher_locals,
-                    student_gpu=self.teacher_student_exclusion,
-                    min_free_gb=teacher_min_free_gb,
+                self.teacher, _, self.teacher_inputs_device = (
+                    load_teacher_with_fallback(
+                        model_name=self.config.teacher_model,
+                        prefer_gpus=self.teacher_locals,
+                        student_gpu=self.teacher_student_exclusion,
+                        min_free_gb=teacher_min_free_gb,
+                    )
                 )
             elif self.is_main_rank:
-                print("Teacher will be hosted on rank 0; skipping local load on this rank.")
+                print(
+                    "Teacher will be hosted on rank 0; skipping local load on this rank."
+                )
 
         # Optionally pre-build offline cache before loading students to free teacher VRAM
-        defer_cache_build = bool(getattr(self.config, "offline_cache_selected_only", False)) and bool(
-            getattr(self.config, "skip_by_frozen_student", False)
-        )
+        defer_cache_build = bool(
+            getattr(self.config, "offline_cache_selected_only", False)
+        ) and bool(getattr(self.config, "skip_by_frozen_student", False))
         self.defer_cache_build = defer_cache_build
         if defer_cache_build:
             if self.is_main_rank:
-                print("[logits-cache] Deferring cache build until after sample selection.", flush=True)
+                print(
+                    "[logits-cache] Deferring cache build until after sample selection.",
+                    flush=True,
+                )
             cache_result = CacheBuildResult(
                 cache_ready=False,
-                cache_manifest_items=int(getattr(self.cache_plan, "cache_manifest_items", 0) or 0),
+                cache_manifest_items=int(
+                    getattr(self.cache_plan, "cache_manifest_items", 0) or 0
+                ),
                 teacher_required=self.teacher_required,
                 teacher_rank0_only=self.teacher_rank0_only,
                 teacher_inputs_device=self.teacher_inputs_device,
@@ -1701,17 +2070,26 @@ class DistillationEntrypoint:
             print(f"Teacher device: {self.teacher_inputs_device}")
         else:
             if self.is_main_rank:
-                print("Teacher load skipped; using offline cache exclusively for teacher signals.")
+                print(
+                    "Teacher load skipped; using offline cache exclusively for teacher signals."
+                )
         print(f"Student device: {self.student_device}")
 
         if self.student_device.type == "cuda":
-            print(f"Using GPU: {torch.cuda.get_device_name(self.student_device.index)} (device {self.student_device.index})")
-            print(f"GPU memory allocated: {torch.cuda.memory_allocated(self.student_device) / 1024**3:.2f} GB")
-            print(f"GPU memory reserved: {torch.cuda.memory_reserved(self.student_device) / 1024**3:.2f} GB")
+            print(
+                f"Using GPU: {torch.cuda.get_device_name(self.student_device.index)} (device {self.student_device.index})"
+            )
+            print(
+                f"GPU memory allocated: {torch.cuda.memory_allocated(self.student_device) / 1024**3:.2f} GB"
+            )
+            print(
+                f"GPU memory reserved: {torch.cuda.memory_reserved(self.student_device) / 1024**3:.2f} GB"
+            )
         else:
             print(f"Using device: {self.student_device}")
 
         if self.is_main_rank:
+
             def _param_count(model):
                 if model is None:
                     return 0
@@ -1743,7 +2121,7 @@ class DistillationEntrypoint:
 
     def _build_distiller(self) -> Distiller:
         if self.config.distill_category == "on_policy":
-            from sampledkd.distill import OnPolicyDistiller
+            from sekd.distill import OnPolicyDistiller
 
             return OnPolicyDistiller(
                 teacher_model=self.teacher,
@@ -1780,7 +2158,9 @@ class DistillationEntrypoint:
             if self.combined_logger:
                 try:
                     self.combined_logger.log_artifact(
-                        self.config.output_dir, f"student_model_{self.experiment_name}", "model"
+                        self.config.output_dir,
+                        f"student_model_{self.experiment_name}",
+                        "model",
                     )
                     self.combined_logger.finish()
                 except Exception:
@@ -1795,7 +2175,11 @@ class DistillationEntrypoint:
 
             for reg_path in self.registry_paths_to_update:
                 try:
-                    mark_trained(reg_path, self.params_hash, model_output_dir=self.config.output_dir)
+                    mark_trained(
+                        reg_path,
+                        self.params_hash,
+                        model_output_dir=self.config.output_dir,
+                    )
                 except Exception as e:
                     print(f"[registry] Failed to mark trained at {reg_path}: {e}")
 
