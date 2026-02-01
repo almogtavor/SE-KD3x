@@ -23,21 +23,17 @@
 
 We introduce **SE-KD** (Student-Entropy-guided KD) and **SE-KD<sub>3X</sub>** (multi-axis selection) for efficient LLM distillation:
 
-| What We Do | Why It Works |
+| What We Do | Why Would It Work? |
 |------------|--------------|
 | 📍 **Position Selection** - Distill only top-k% tokens by student entropy | High-entropy "fork" tokens carry most learning signal |
-| 📊 **Class Sampling** - Sample vocabulary classes via RS-KD | Unbiased gradients with 99.96% storage reduction |
-| 📁 **Sample Filtering** - Keep top-l% samples by avg. student entropy | Focus compute on informative training examples |
-
-<p align="center">
-  <img src="assets/selection_axes.png" width="55%">
-</p>
+| 📊 **Class Sampling** - Sample vocabulary classes via RS-KD | Unbiased gradients matches Full KD in expectation. Leads to 99.96% storage reduction when combined with sample selection |
+| 📁 **Sample Selection** - Keep top-l% samples by avg. student entropy | Focus compute on informative training examples |
 
 ---
 
 ## 📊 Key Results
 
-Trained on **80M tokens** from FineWeb-Edu, evaluated zero-shot:
+Trained on **80M tokens** from FineWeb-Edu, evaluated zero-shot on 3 seeds:
 
 | Method | Accuracy ↑ | IFEval ↑ | PPL ↓ | ECE ↓ |
 |--------|:----------:|:--------:|:-----:|:-----:|
@@ -75,7 +71,7 @@ python run_distillation.py \
 ```
 
 <details>
-<summary><b>🔧 Full KD Baseline</b></summary>
+<summary><b>Full KD Baseline</b></summary>
 
 ```bash
 python run_distillation.py \
@@ -88,7 +84,7 @@ python run_distillation.py \
 </details>
 
 <details>
-<summary><b>🚀 SE-KD<sub>3X</sub> (Full 3-axis selection)</b></summary>
+<summary><b>SE-KD<sub>3X</sub> (Full 3-axis selection)</b></summary>
 
 ```bash
 python run_distillation.py \
@@ -110,7 +106,9 @@ python run_distillation.py \
 
 ## 🧠 Method
 
-Not all tokens are equal for distillation. High-entropy "fork" positions—where the model is uncertain between multiple valid continuations—carry most of the learning signal. We select the **top-20% highest student-entropy positions** for KD supervision.
+Standard knowledge distillation applies teacher supervision uniformly at every token position—but this is suboptimal. Not all positions benefit equally from distillation.
+
+We use **student entropy** `H(q_t)` to identify where the student is most uncertain. These high-uncertainty positions are where the teacher's guidance provides the most value. By selecting only the **top-20% highest student-entropy positions** for KD supervision, we focus compute on tokens that actually need it—and often outperform full dense supervision.
 
 <details>
 <summary><b>Memory Optimizations</b></summary>
@@ -132,52 +130,45 @@ Together at `k=20%`: **-28% student peak memory**, **-9% teacher peak memory**.
 <details>
 <summary><b>Position-Importance Metrics</b></summary>
 
-| Metric | Best For |
-|--------|----------|
-| **Student Entropy** `H(q_t)` | Overall best signal |
-| Reverse KL `KL(q\|\|p)` | Strong alternative |
-| CE Ratio `CE_s/CE_t` | Best perplexity |
-| Teacher Entropy `H(p_t)` | Baseline comparison |
+We systematically compared 9 importance signals to determine which positions benefit most from distillation:
+
+| Metric | What it measures | Best For |
+|--------|------------------|----------|
+| **Student Entropy** `H(q_t)` | Student's uncertainty at position t | Overall best signal |
+| Reverse KL `KL(q∥p)` | How much student diverges from teacher | Strong alternative |
+| CE Ratio `CE_s/CE_t` | Relative difficulty (student CE / teacher CE) | Best perplexity |
+| Teacher Entropy `H(p_t)` | Teacher's uncertainty at position t | Baseline comparison |
+
+Student entropy consistently identifies the most valuable positions—where the student needs guidance most.
 
 </details>
 
 <details>
 <summary><b>Selection Policies</b></summary>
 
-| Policy | Description |
-|--------|-------------|
-| **Top-k%** | Hard selection of k% highest-scoring positions |
-| GLS | Global-level selection with FIFO queue |
-| Curriculum | Easy → hard progression over training |
-| Pos RS-KD | Stochastic position sampling |
+Given an importance metric, how should we convert scores into a selection decision?
+
+| Policy | How it works |
+|--------|--------------|
+| **Top-k%** | Deterministically select the k% highest-scoring positions per sequence |
+| GLS | Global-level selection with thresholds normalized across batches via FIFO queue |
+| Curriculum | Start with easy positions, progressively expand to harder ones during training |
+| Pos RS-KD | Stochastically sample positions proportional to importance weights |
+
+Top-k% with student entropy is the most reliable strategy at k=20%.
+
+
+An illustration of position selection (SE-KD) when combined with RS-KD (blue), compared to RS-KD alone (light blue, selection at every position), on one sample:
+<p align="center">
+  <img src="assets/selection_axes.png" width="55%">
+</p>
 
 </details>
 
 ---
 
 <details>
-<summary><b>📁 Project Structure</b></summary>
-
-```
-SE-KD3X/
-├── sekd/                    # Core package
-│   ├── config.py           # Training configuration
-│   ├── distill/            # Distillation trainers & losses
-│   │   ├── trainer.py      # Main Distiller class
-│   │   ├── selective_lm_head.py  # Memory-efficient logit computation
-│   │   └── _mixins/        # Modular components (entropy, GLS, etc.)
-│   ├── data/               # Dataset utilities
-│   ├── models/             # Model loading
-│   └── training/           # Distributed training, caching
-├── run_distillation.py     # Main entry point
-├── examples/               # Example scripts
-└── tests/                  # Unit tests
-```
-
-</details>
-
-<details>
-<summary><b>🔬 Reproduce Paper Results</b></summary>
+<summary><b>To Reproduce Paper Results</b></summary>
 
 ```bash
 # Shared hyperparameters (Table 8 in paper)
@@ -195,12 +186,11 @@ See [examples/](examples/) for full reproduction scripts.
 ## 📖 Citation
 
 ```bibtex
-@inproceedings{sekd2025,
+@article{sekd2025,
   title={Rethinking Selective Knowledge Distillation},
   author={Anonymous},
-  booktitle={International Conference on Machine Learning (ICML)},
-  year={2025},
-  note={Under review}
+  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  year={2025}
 }
 ```
 
