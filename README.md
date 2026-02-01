@@ -11,7 +11,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/pytorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
 
-**Dense supervision is unnecessary.** Distill only the **top-20% highest-entropy tokens** and match or beat Full KD—with massive efficiency gains.
+**Dense supervision is unnecessary.** Distill only the **top-20% highest-entropy tokens** and match or beat Full KD-with massive efficiency gains.
 
 [Quick Start](#-quick-start) · [Results](#-key-results) · [Method](#-method) · [Citation](#-citation)
 
@@ -106,18 +106,18 @@ python run_distillation.py \
 
 ## 🧠 Method
 
-Standard knowledge distillation applies teacher supervision uniformly at every token position—but this is suboptimal. Not all positions benefit equally from distillation.
+Standard knowledge distillation applies teacher supervision uniformly at every token position-but this is suboptimal. Not all positions benefit equally from distillation.
 
-We use **student entropy** `H(q_t)` to identify where the student is most uncertain. These high-uncertainty positions are where the teacher's guidance provides the most value. By selecting only the **top-20% highest student-entropy positions** for KD supervision, we focus compute on tokens that actually need it—and often outperform full dense supervision.
+We use **student entropy** `H(q_t)` to identify where the student is most uncertain. These high-uncertainty positions are where the teacher's guidance provides the most value. By selecting only the **top-20% highest student-entropy positions** for KD supervision, we focus compute on tokens that actually need it-and often outperform full dense supervision.
 
 <details>
 <summary><b>Memory Optimizations</b></summary>
 
 Two optimizations reduce the memory footprint (see [detailed docs](sekd/distill/SELECTIVE_LM_HEAD_README.md)):
 
-- **Chunked Entropy Computation** — Computes per-position entropy without materializing the full `[B,L,V]` logit tensor. Hidden states are projected through the LM head in small chunks (gradients disabled), reduced to `O(BL)` entropy scalars, then discarded.
+- **Chunked Entropy Computation** - Computes per-position entropy without materializing the full `[B,L,V]` logit tensor. Hidden states are projected through the LM head in small chunks (gradients disabled), reduced to `O(BL)` entropy scalars, then discarded.
 
-- **Selective LM Head** — Computes logits only at selected positions. Teacher logits shrink from `[B,L,V]` to `[N_select,V]`, and backpropagation runs through only `N_select` positions instead of all `B×L`.
+- **Selective LM Head** - Computes logits only at selected positions. Teacher logits shrink from `[B,L,V]` to `[N_select,V]`, and backpropagation runs through only `N_select` positions instead of all `B×L`.
 
 Together at `k=20%`: **-28% student peak memory**, **-9% teacher peak memory**.
 
@@ -139,7 +139,7 @@ We systematically compared 9 importance signals to determine which positions ben
 | CE Ratio `CE_s/CE_t` | Relative difficulty (student CE / teacher CE) | Best perplexity |
 | Teacher Entropy `H(p_t)` | Teacher's uncertainty at position t | Baseline comparison |
 
-Student entropy consistently identifies the most valuable positions—where the student needs guidance most.
+Student entropy consistently identifies the most valuable positions-where the student needs guidance most.
 
 </details>
 
