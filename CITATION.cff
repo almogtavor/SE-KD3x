@@ -1,0 +1,49 @@
+cff-version: 1.2.0
+title: "SE-KD3X: Rethinking Selective Knowledge Distillation"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Tavor"
+    given-names: "Almog"
+    email: "almogt@mail.tau.ac.il"
+    affiliation: "Tel Aviv University"
+  - family-names: "Cnaan"
+    given-names: "Neil"
+    email: "neilcnaan@mail.tau.ac.il"
+    affiliation: "Tel Aviv University"
+  - family-names: "Ebenspanger"
+    given-names: "Itay"
+    email: "ebenspanger@mail.tau.ac.il"
+    affiliation: "Tel Aviv University"
+  - family-names: "Geva"
+    given-names: "Mor"
+    email: "morgeva@tauex.tau.ac.il"
+    affiliation: "Tel Aviv University"
+repository-code: "https://github.com/yourusername/SE-KD3X"
+url: "https://github.com/yourusername/SE-KD3X"
+abstract: "SE-KD3X implements student-entropy-guided selective knowledge distillation for large language models. By distilling only the top-20% highest-entropy positions, SE-KD matches or exceeds Full KD accuracy while reducing wall time by 70%, peak memory by 18%, and storage by 99.96%."
+keywords:
+  - knowledge-distillation
+  - large-language-models
+  - selective-distillation
+  - machine-learning
+  - deep-learning
+license: Apache-2.0
+version: "0.1.0"
+date-released: "2025-01-31"
+preferred-citation:
+  type: conference-paper
+  authors:
+    - family-names: "Tavor"
+      given-names: "Almog"
+    - family-names: "Cnaan"
+      given-names: "Neil"
+    - family-names: "Ebenspanger"
+      given-names: "Itay"
+    - family-names: "Geva"
+      given-names: "Mor"
+  title: "Rethinking Selective Knowledge Distillation"
+  conference:
+    name: "International Conference on Machine Learning (ICML)"
+  year: 2025
+  notes: "Under review"

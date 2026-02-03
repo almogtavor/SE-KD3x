@@ -1,0 +1,24 @@
+# SE-KD3X Requirements
+# For CUDA support, install PyTorch from https://pytorch.org/get-started/locally/
+
+# Core dependencies
+torch>=2.2.0
+transformers>=4.45.0
+datasets>=2.14.0
+accelerate>=0.25.0
+bitsandbytes>=0.41.0
+sentencepiece>=0.1.99
+pydantic>=2.0.0
+numpy<2
+tqdm>=4.65.0
+rich>=13.0.0
+
+# Logging (optional)
+wandb>=0.15.0
+tensorboard>=2.14.0
+
+# Evaluation (optional)
+lm-eval>=0.4.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+scikit-learn>=1.3.0
