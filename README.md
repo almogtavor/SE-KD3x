@@ -6,7 +6,8 @@
 
 <img src="assets/sekd_overview.png" width="90%">
 
-[![Paper](https://img.shields.io/badge/Paper-OpenReview-b31b1b.svg)](https://openreview.net/attachment?id=zRxYXSdQlT&name=pdf)
+[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b.svg)](https://arxiv.org/abs/2602.01395)
+[![HF Paper](https://img.shields.io/badge/Paper-HuggingFace-yellow.svg)](https://huggingface.co/papers/2602.01395)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch 2.2+](https://img.shields.io/badge/pytorch-2.2+-ee4c2c.svg)](https://pytorch.org/)
