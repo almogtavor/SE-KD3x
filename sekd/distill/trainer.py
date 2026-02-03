@@ -26,7 +26,6 @@ from ..training.offline_cache import (
 )
 from ._mixins.token_entropy_logger import TokenEntropyLogger
 from ._mixins.amp_oom import AmpOomMixin
-from ._mixins.bandit import BanditMixin
 from ._mixins.cache import CacheMixin
 from ._mixins.checkpoint import CheckpointMixin
 from ._mixins.entropy import EntropyMixin
@@ -67,7 +66,6 @@ class Distiller(
     SelectionScoringMixin,
     EntropyMixin,
     KDCoreMixin,
-    BanditMixin,
 ):
     """Main distillation trainer class.
     It takes a teacher and a student model, a tokenizer, and a dataloader, then performs distillation ."""
@@ -213,6 +211,9 @@ class Distiller(
             debug_path.write_text("", encoding="utf-8")
             self._topk_debug_path = debug_path
 
+        # Bandit manager (removed - kept as None for backwards compatibility)
+        self.bandit_manager = None
+
         # offline teacher logits cache: centralized initialization
         self.cache = None
 
@@ -236,9 +237,6 @@ class Distiller(
         self._selection_curriculum_power = max(
             0.0, float(getattr(self.config, "selection_curriculum_power", 1.0))
         )
-
-        # LinUCB contextual bandit setup
-        self._init_bandit_manager()
 
         # Optional sample skipping (computed once from frozen student pre-pass)
         self.sample_skipper: Optional[FrozenStudentSampleSkipper] = None
@@ -725,7 +723,7 @@ class Distiller(
             debug_log: Whether to emit verbose debug logging for this batch.
 
         Returns:
-            Tuple containing the KD loss tensor and optional auxiliary info (for LinUCB).
+            Tuple containing the KD loss tensor and optional auxiliary info.
         """
         extra: Optional[Dict[str, Any]] = None
         kd_loss = s_pred.sum() * 0.0
@@ -823,18 +821,6 @@ class Distiller(
             )
         if distill_type == "pos-rs-kd-dkd":
             return self._kd_loss_pos_rs_kd_dkd(
-                t_pred=t_pred,
-                t_log_probs=t_log_probs,
-                s_pred=s_pred,
-                s_log_probs=s_log_probs,
-                valid_next=valid_next,
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                temperature=temperature,
-                debug_log=debug_log,
-            )
-        if distill_type in {"linucb", "linucb-dkd"}:
-            return self._kd_loss_linucb(
                 t_pred=t_pred,
                 t_log_probs=t_log_probs,
                 s_pred=s_pred,
@@ -2192,110 +2178,6 @@ class Distiller(
         )
         return kd_loss, None
 
-    def _kd_loss_linucb(
-        self,
-        *,
-        t_pred: torch.Tensor,
-        t_log_probs: torch.Tensor,
-        s_pred: torch.Tensor,
-        s_log_probs: torch.Tensor,
-        valid_next: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        temperature: float,
-        debug_log: bool,
-    ) -> Tuple[torch.Tensor, Optional[Dict[str, Any]]]:
-        if self.bandit_manager is None:
-            raise RuntimeError("LinUCB bandit is not initialized.")
-        ent_raw = self._entropy_for_selection(input_ids, t_pred)
-        # Use the same temperature as KD for CE computation (consistency fix)
-        kl_pos = self._kl_directional(t_log_probs, s_log_probs)
-        student_entropy = (-(s_log_probs.exp() * s_log_probs).sum(-1)).detach()
-
-        targets = input_ids[:, 1:].to(self.student_device)
-        targets = targets.masked_fill(~valid_next, 0)
-        # Teacher/student CE and KL are the contextual features consumed by the bandit.
-        # Use log_probs at temperature T (already computed) for consistency
-        targets_t = targets.to(t_log_probs.device, non_blocking=True)
-        teacher_ce = (
-            (-t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(-1))
-            .to(self.student_device)
-            .detach()
-        )
-        student_ce = (
-            -s_log_probs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        ).detach()
-
-        kd_terms, metrics, selection = self.bandit_manager.select_tokens(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            ent_raw=ent_raw.detach(),
-            student_entropy=student_entropy,
-            teacher_ce=teacher_ce,
-            student_ce=student_ce,
-            kl_pos=kl_pos,
-            valid_next=valid_next,
-            temperature=temperature,
-        )
-        use_dkd = getattr(self.config, "distill_type", "linucb") == "linucb-dkd"
-        udkd_enabled = bool(getattr(self.config, "udkd_loss", False))
-        if use_dkd:
-            if selection is None or selection[0].numel() == 0:
-                kd_loss = s_pred.sum() * 0.0
-            else:
-                b_idx_cpu, t_idx_cpu = selection
-                b_idx_student = b_idx_cpu.to(self.student_device)
-                t_idx_student = t_idx_cpu.to(self.student_device)
-                device_t = t_log_probs.device
-                b_idx_t = b_idx_cpu.to(device_t)
-                t_idx_t = t_idx_cpu.to(device_t)
-                t_rows = t_log_probs[b_idx_t, t_idx_t, :].to(self.student_device)
-                s_rows = s_log_probs[b_idx_student, t_idx_student, :]
-                student_targets = input_ids[:, 1:].to(self.student_device)
-                targets_sel = student_targets[b_idx_student, t_idx_student]
-                kd_rows = self._compute_dkd_total_rows(
-                    t_rows.exp(), s_rows.exp(), targets_sel
-                )
-                kd_loss = kd_rows.mean() if kd_rows.numel() > 0 else s_pred.sum() * 0.0
-        elif udkd_enabled:
-            # UDKD loss for linucb
-            if selection is None or selection[0].numel() == 0:
-                kd_loss = s_pred.sum() * 0.0
-            else:
-                b_idx_cpu, t_idx_cpu = selection
-                b_idx_student = b_idx_cpu.to(self.student_device)
-                t_idx_student = t_idx_cpu.to(self.student_device)
-                device_t = t_log_probs.device
-                b_idx_t = b_idx_cpu.to(device_t)
-                t_idx_t = t_idx_cpu.to(device_t)
-                t_rows = t_log_probs[b_idx_t, t_idx_t, :].to(self.student_device)
-                s_rows = s_log_probs[b_idx_student, t_idx_student, :]
-                student_targets = input_ids[:, 1:].to(self.student_device)
-                targets_udkd = student_targets[b_idx_student, t_idx_student]
-                udkd_metric = str(
-                    getattr(self.config, "udkd_uncertainty_metric", "unc")
-                )
-                udkd_loss_fn = UDKDLoss(uncertainty_metric=udkd_metric)
-                teacher_probs = t_rows.exp()
-                student_probs = s_rows.exp()
-                udkd_total, udkd_tckd, udkd_nckd, udkd_gate = udkd_loss_fn(
-                    teacher_probs, student_probs, targets_udkd
-                )
-                kd_loss = udkd_total.mean()
-                if self.logger:
-                    self.logger.log(
-                        {
-                            "train/udkd_tckd": float(udkd_tckd.mean().item()),
-                            "train/udkd_nckd": float(udkd_nckd.mean().item()),
-                            "train/udkd_gate_mean": float(udkd_gate.mean().item()),
-                        },
-                        self.global_step,
-                    )
-        else:
-            kd_loss = torch.cat(kd_terms).mean() if kd_terms else s_pred.sum() * 0.0
-        extra = metrics or None
-        return kd_loss, extra
-
     def train(self, epochs: int = 1, log_every: int = 100):
         """Run distillation training for specified number of epochs."""
         overall_train_start = time.time()
@@ -2323,7 +2205,6 @@ class Distiller(
         if getattr(self.config, "offline_cache", False):
             self._prepare_offline_cache(build_cache_on_rank)
 
-        self._reset_bandit_state()
         kd_schedule = self._create_kd_schedule(epochs)
         self._run_training_epochs(epochs, log_every, rank_is_zero, kd_schedule)
         # Final checkpoint and cleanup at the end
@@ -2726,11 +2607,6 @@ class Distiller(
                         "Offline cache not ready on non-building rank and teacher unavailable."
                     )
 
-    def _reset_bandit_state(self) -> None:
-        if self.bandit_manager is not None:
-            # Guard against stale pending batches when resuming training or restarting loops.
-            self.bandit_manager.reset()
-
     def _maybe_create_profiler(self, rank_is_zero: bool):
         if not rank_is_zero:
             return None
@@ -2912,8 +2788,6 @@ class Distiller(
             for epoch in range(start_epoch, epochs):
                 step_start = time.time()
                 running = {"loss": 0.0, "kl": 0.0, "ce": 0.0}
-                bandit_running: Dict[str, float] = {}
-                bandit_steps = 0
                 last_reward_metrics: Optional[Dict[str, float]] = None
                 self.opt.zero_grad(set_to_none=True)  # Initialize gradients
 

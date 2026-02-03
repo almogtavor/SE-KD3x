@@ -67,10 +67,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/SE-KD3X"
-Documentation = "https://github.com/yourusername/SE-KD3X#readme"
-Repository = "https://github.com/yourusername/SE-KD3X.git"
-Issues = "https://github.com/yourusername/SE-KD3X/issues"
+Homepage = "https://github.com/almogtavor/SE-KD3X"
+Documentation = "https://github.com/almogtavor/SE-KD3X#readme"
+Repository = "https://github.com/almogtavor/SE-KD3X.git"
+Issues = "https://github.com/almogtavor/SE-KD3X/issues"
 
 [project.scripts]
 sekd-train = "sekd.cli:main"

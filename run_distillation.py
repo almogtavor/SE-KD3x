@@ -252,8 +252,6 @@ def parse_args_to_config() -> TrainingConfig:
             "bucket",
             "pos-rs-kd",
             "pos-rs-kd-dkd",
-            "linucb",
-            "linucb-dkd",
             "atkd",
             "dkd",
         ],
@@ -596,48 +594,6 @@ def parse_args_to_config() -> TrainingConfig:
         type=float,
         default=1.0,
         help="Weight for teacher-student KL component in score-based KD",
-    )
-    parser.add_argument(
-        "--bandit_alpha",
-        type=float,
-        default=1.0,
-        help="Exploration coefficient for LinUCB contextual bandit",
-    )
-    parser.add_argument(
-        "--bandit_lambda",
-        type=float,
-        default=1.0,
-        help="L2 regularization strength for LinUCB covariance matrix",
-    )
-    parser.add_argument(
-        "--bandit_threshold",
-        type=float,
-        default=0.5,
-        help="Minimum UCB score required for LinUCB to keep a token",
-    )
-    parser.add_argument(
-        "--bandit_min_tokens",
-        type=int,
-        default=1,
-        help="Force LinUCB to keep at least this many tokens per example",
-    )
-    parser.add_argument(
-        "--bandit_max_tokens",
-        type=int,
-        default=128,
-        help="Optional cap on the number of tokens LinUCB can keep per example",
-    )
-    parser.add_argument(
-        "--bandit_device",
-        type=str,
-        default="cpu",
-        help="Device to maintain LinUCB statistics (cpu or cuda)",
-    )
-    parser.add_argument(
-        "--bandit_reward_clip",
-        type=float,
-        default=25.0,
-        help="Absolute clip value applied to KL improvement rewards before LinUCB updates",
     )
     parser.add_argument(
         "--enable_ce",
@@ -1179,8 +1135,6 @@ class DistillationEntrypoint:
             "top-k-tok",
             "bucket",
             "random",
-            "linucb",
-            "linucb-dkd",
         }
         if getattr(self.config, "offline_cache_mode", "entropy") == "unc":
             self.teacherless_modes = self.teacherless_modes | {"atkd"}

@@ -188,8 +188,8 @@ See [examples/](examples/) for full reproduction scripts.
 ```bibtex
 @article{sekd2025,
   title={Rethinking Selective Knowledge Distillation},
-  author={Anonymous},
-  journal={arXiv preprint arXiv:XXXX.XXXXX},
+  author={Tavor, Almog and Ebenspanger, Itay and Cnaan, Neil and Geva, Mor},
+  journal={arXiv preprint arXiv:2507.21493},
   year={2025}
 }
 ```

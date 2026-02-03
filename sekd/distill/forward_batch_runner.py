@@ -20,7 +20,6 @@ from ..training.offline_cache import (
 )
 from ._mixins.token_entropy_logger import TokenEntropyLogger
 from ._mixins.amp_oom import AmpOomMixin
-from ._mixins.bandit import BanditMixin
 from ._mixins.cache import CacheMixin
 from ._mixins.checkpoint import CheckpointMixin
 from ._mixins.entropy import EntropyMixin
@@ -680,8 +679,6 @@ class ForwardBatchRunner:
             "random-dkd",
             "dkd",
             "pos-rs-kd-dkd",
-            "linucb",
-            "linucb-dkd",
         }
         if self.cache_mode == "unc":
             cache_only_supported.add("atkd")
@@ -1208,70 +1205,6 @@ class ForwardBatchRunner:
                 self.kd_loss = kd_stack.mean()
         self.ce_loss_override = None
 
-    def _handle_cached_distill_linucb(
-        self,
-        kd_pos_proxy,
-        ce_pos_proxy,
-        T,
-    ) -> None:
-        if self.distiller.bandit_manager is None:
-            raise RuntimeError("LinUCB bandit is not initialized.")
-        ent_for_bandit = self.distiller._entropy_for_selection(
-            self.input_ids, t_pred=None
-        )
-        if self.s_log_probs is None:
-            self.s_log_probs = torch.log_softmax((self.s_pred.float() / self.T), dim=-1)
-        student_entropy = (
-            -(self.s_log_probs.exp() * self.s_log_probs).sum(-1)
-        ).detach()
-        teacher_ce = None
-        if self.t_log_probs is not None:
-            targets_t = self.input_ids[:, 1:].to(
-                self.t_log_probs.device, non_blocking=True
-            )
-            teacher_logp = self.t_log_probs.gather(-1, targets_t.unsqueeze(-1)).squeeze(
-                -1
-            )
-            teacher_ce = (-teacher_logp).to(self.distiller.student_device).detach()
-        student_ce = ce_pos_proxy.detach()
-        kd_terms, metrics, selection = self.distiller.bandit_manager.select_tokens(
-            input_ids=self.input_ids,
-            attention_mask=self.attn_mask,
-            ent_raw=ent_for_bandit.detach(),
-            student_entropy=student_entropy,
-            teacher_ce=teacher_ce,
-            student_ce=student_ce,
-            kl_pos=kd_pos_proxy,
-            valid_next=self.valid_next,
-            temperature=T,
-        )
-        use_dkd = (
-            getattr(self.distiller.config, "distill_type", "linucb") == "linucb-dkd"
-        )
-
-        if use_dkd:
-            if selection is None or selection[0].numel() == 0:
-                self.kd_loss = self.s_pred.sum() * 0.0
-                self.ce_loss_override = None
-            else:
-                keep_mask = torch.zeros_like(self.valid_next, dtype=torch.bool)
-                b_idx, t_idx = selection
-                b_idx = b_idx.to(keep_mask.device)
-                t_idx = t_idx.to(keep_mask.device)
-                keep_mask[b_idx, t_idx] = True
-                if keep_mask.any():
-                    self._cached_dkd_loss_from_keepmask(keep_mask)
-                else:
-                    self.kd_loss = self.s_pred.sum() * 0.0
-                    self.ce_loss_override = None
-        else:
-            kd_loss = (
-                torch.cat(kd_terms).mean() if kd_terms else self.s_pred.sum() * 0.0
-            )
-            self.kd_loss = kd_loss
-            self.ce_loss_override = None
-        self.extra_metrics = metrics or None
-
     def _rs_bucket_bounds(self):
         """Return (lower_q, upper_q) if pos-rs bucket mode is active, else None."""
         return self.distiller._rs_bucket_bounds()
@@ -1424,10 +1357,6 @@ class ForwardBatchRunner:
         ce_pos_proxy,
         T,
     ) -> None:
-        if distill_type in {"linucb", "linucb-dkd"}:
-            self._handle_cached_distill_linucb(kd_pos_proxy, ce_pos_proxy, T)
-            return
-
         if distill_type == "pos-rs-kd":
             self._handle_cached_distill_pos_rs_kd(kd_pos_proxy, ce_pos_proxy)
             return

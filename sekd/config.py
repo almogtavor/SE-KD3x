@@ -26,8 +26,6 @@ class TrainingConfig(BaseModel):
         "bucket",
         "pos-rs-kd",
         "pos-rs-kd-dkd",
-        "linucb",
-        "linucb-dkd",
         "atkd",
         "dkd",
     ] = "vanilla"
@@ -258,34 +256,6 @@ class TrainingConfig(BaseModel):
     score_kl_weight: float = Field(
         default=1.0,
         description="Weight for teacher-student KL component in score-based KD",
-    )
-
-    # LinUCB contextual bandit parameters
-    bandit_alpha: float = Field(
-        default=1.0,
-        description="Exploration coefficient for LinUCB (higher = more exploratory)",
-    )
-    bandit_lambda: float = Field(
-        default=1.0, description="L2 regularization for LinUCB covariance matrix"
-    )
-    bandit_threshold: float = Field(
-        default=0.5, description="Minimum UCB score for a token to be selected"
-    )
-    bandit_min_tokens: int = Field(
-        default=1,
-        description="Minimum number of tokens to distill per example when using LinUCB",
-    )
-    bandit_max_tokens: Optional[int] = Field(
-        default=64,
-        description="Optional cap on tokens distilled per example in LinUCB mode",
-    )
-    bandit_device: str = Field(
-        default="cpu",
-        description="Device to maintain the LinUCB statistics on (cpu or cuda)",
-    )
-    bandit_reward_clip: float = Field(
-        default=5.0,
-        description="Absolute clip value applied to KL improvement rewards before LinUCB update",
     )
 
     # On-policy distillation settings
